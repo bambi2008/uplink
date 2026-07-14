@@ -1,0 +1,1179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Uplink · 和 Jake 通话</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E9EEF2; --fog:#8FA3B0; --amber:#E8A254; --danger:#D9705F; --green:#7FB585;
+    --steel:#2C3E4E; --deep:#05070C;
+    --disp:"Fraunces",serif; --mono:"IBM Plex Mono",monospace;
+    --body:"Inter","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden}
+  body{background:#04060B;color:var(--paper);font-family:var(--mono)}
+  .scene{position:fixed;inset:0;background:radial-gradient(130% 100% at 74% 24%,#0d1420 0%,#05070C 55%)}
+  svg.sky{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .hud-top{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;pointer-events:none;
+    padding:20px 30px;font-size:12px;letter-spacing:.22em;color:#5C6B78;z-index:5}
+
+  /* 失重漂浮物 */
+  .floaty{position:absolute;z-index:4;pointer-events:none;font-size:22px;opacity:.5}
+  /* 信号往返光点 */
+  .ping{position:absolute;z-index:5;width:10px;height:10px;border-radius:50%;background:var(--amber);
+    box-shadow:0 0 12px var(--amber);opacity:0;pointer-events:none}
+
+  /* 左下 通讯控制台 */
+  .panel{position:absolute;left:0;bottom:0;width:400px;padding:30px;z-index:6}
+  .kicker{font-size:11px;letter-spacing:.2em;color:#5C6B78;margin-bottom:12px}
+  .who{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+  .badge{width:54px;height:54px;border-radius:50%;border:1px solid var(--steel);background:#0C141C;
+    overflow:hidden;flex:none;box-shadow:0 0 0 4px rgba(232,162,84,0);transition:box-shadow .4s}
+  .badge svg{width:100%;height:100%;display:block}
+  .speaking .badge{box-shadow:0 0 0 4px rgba(232,162,84,.18)}
+  .name{font-family:var(--disp);font-size:32px;line-height:1;color:var(--paper)}
+  .status{font-size:11px;letter-spacing:.14em;margin-top:7px;color:var(--fog);min-height:15px;line-height:1.5}
+  .listening .status{color:var(--green)} .speaking .status{color:var(--amber)}
+
+  /* 声波 */
+  .wave{display:flex;align-items:flex-end;gap:4px;height:34px;margin:16px 0 18px;opacity:.35;transition:opacity .3s}
+  .speaking .wave{opacity:1}
+  .wv{width:6px;background:var(--amber);border-radius:2px;animation:wv 1.1s ease-in-out infinite}
+  .wv:nth-child(3n){background:var(--green)}
+  @keyframes wv{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+
+  .conn{font-size:11px;letter-spacing:.12em;color:#5C6B78;margin-bottom:6px;min-height:14px}
+  .conn b{color:var(--green);font-weight:400}
+  .timer{font-size:11px;letter-spacing:.12em;color:#5C6B78;display:none;margin-bottom:14px}
+  .timer b{color:var(--paper);font-weight:400}
+
+  .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  button{font-family:var(--mono);cursor:pointer;transition:all .25s}
+  .primaryBtn{background:rgba(232,162,84,.08);color:var(--amber);border:1px solid var(--amber);
+    border-radius:28px;padding:18px 38px;font-size:14px;letter-spacing:.12em;position:relative;z-index:7}
+  .primaryBtn:hover{background:rgba(232,162,84,.2)}
+  .primaryBtn:active{background:rgba(232,162,84,.35);transform:scale(.97)}
+  #btnEnd{display:none;background:transparent;color:var(--danger);border:1px solid rgba(217,112,95,.4);
+    border-radius:26px;padding:14px 22px;font-size:13px;letter-spacing:.1em}
+  #btnZh{display:none;background:rgba(127,181,133,.10);color:var(--green);
+    border:2px solid var(--green);border-radius:30px;padding:18px 34px;
+    font-size:16px;font-weight:700;letter-spacing:.14em}
+  #btnZh:hover{background:rgba(127,181,133,.22)}
+  #btnZh:active{transform:scale(.96)}
+  #btnZh.on{color:#0B131B;background:var(--green);border-color:var(--green);
+    box-shadow:0 0 26px rgba(127,181,133,.5);animation:zhPulse 1.2s ease-in-out infinite}
+  @keyframes zhPulse{0%,100%{box-shadow:0 0 14px rgba(127,181,133,.35)}50%{box-shadow:0 0 30px rgba(127,181,133,.65)}}
+  .hint{font-size:11.5px;color:#5C6B78;margin-top:12px;max-width:360px;line-height:1.7}
+  .links{display:flex;gap:6px;margin-top:14px}
+  .linkish{background:none;border:none;color:#5C6B78;font-size:11px;letter-spacing:.1em;
+    text-decoration:underline;text-underline-offset:3px;padding:6px}
+  .linkish:hover{color:var(--paper)}
+  button:disabled{opacity:.4;cursor:default}
+
+  /* 右下 本地时间 */
+  .corner{position:absolute;right:30px;bottom:30px;text-align:right;z-index:6}
+  .localt{font-size:11px;letter-spacing:.18em;color:#5C6B78}
+
+  /* 窗下 HUD 当前句 */
+  .hud-line{position:absolute;left:calc(50% + 60px);bottom:64px;transform:translateX(-50%);z-index:6;
+    max-width:860px;text-align:center;font-size:30px;line-height:1.5;color:#F0D9B8;
+    letter-spacing:.01em;text-shadow:0 2px 26px rgba(0,0,0,.95);transition:opacity .5s;pointer-events:none;opacity:0;
+    font-family:var(--body);font-weight:500}
+  .hud-line.show{opacity:1}
+  .hud-line .tag{font-size:13px;letter-spacing:.22em;color:var(--amber);display:block;margin-bottom:8px;opacity:.85;font-family:var(--mono);font-weight:400}
+  .hud-line.local{color:#AEC4D2}.hud-line.local .tag{color:#7FA0B5}
+
+  /* 右侧滑出 通讯电文流 */
+  .drawer-tab{position:absolute;right:0;top:50%;transform:translateY(-50%);z-index:8;
+    writing-mode:vertical-rl;background:rgba(20,30,40,.75);border:1px solid var(--steel);border-right:none;
+    border-radius:10px 0 0 10px;padding:16px 9px;font-size:11px;letter-spacing:.22em;color:var(--fog);
+    cursor:pointer;transition:all .3s}
+  .drawer-tab:hover{color:var(--paper);border-color:var(--amber)}
+  .drawer{position:absolute;top:0;right:0;bottom:0;width:620px;max-width:92vw;z-index:9;
+    background:rgba(7,11,17,.95);border-left:1px solid #23323f;
+    transform:translateX(100%);transition:transform .4s cubic-bezier(.4,0,.2,1);
+    display:flex;flex-direction:column;padding:24px 26px;pointer-events:none;visibility:hidden}
+  .drawer.open{transform:translateX(0);pointer-events:auto;visibility:visible}
+  .drawer-head{display:flex;justify-content:space-between;align-items:center;
+    border-bottom:1px solid #23323f;padding-bottom:12px;margin-bottom:14px}
+  .drawer-head .t{font-size:12px;letter-spacing:.2em;color:var(--fog)}
+  .drawer-head .x{cursor:pointer;color:#5C6B78;font-size:18px;line-height:1}
+  .drawer-head .x:hover{color:var(--paper)}
+  #log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:20px;font-size:26px;line-height:1.55;font-family:var(--body)}
+  .log-empty{color:#5C6B78;font-size:16px;margin:auto;text-align:center;max-width:80%;line-height:1.7;font-family:var(--body)}
+  .msg .who{font-size:12px;letter-spacing:.2em;display:block;margin-bottom:5px;font-family:var(--mono)}
+  .msg.jake{color:#E3EAF0}.msg.jake .who{color:var(--amber)}
+  .msg.me{color:#9FB4C2}.msg.me .who{color:#7FA0B5}
+  .msg.partial{opacity:.5;font-style:italic}
+  #log::-webkit-scrollbar{width:5px}#log::-webkit-scrollbar-thumb{background:#23323f;border-radius:3px}
+
+  /* 设置/复盘/复习 弹窗 */
+  .overlay{position:fixed;inset:0;background:rgba(4,6,11,.88);backdrop-filter:blur(6px);
+    display:none;align-items:center;justify-content:center;padding:24px;z-index:20}
+  .sheet{background:#0B131B;border:1px solid #23323f;border-radius:16px;width:min(640px,100%);
+    max-height:86vh;overflow-y:auto;padding:32px 36px;font-family:var(--body)}
+  .sheet h2{font-family:var(--disp);font-size:23px;margin-bottom:6px;color:var(--paper)}
+  .sheet .sub{color:var(--fog);font-size:13px;margin-bottom:16px;line-height:1.8}
+  .sheet label{font-size:13px;color:var(--fog);display:block;margin-top:12px}
+  .sheet input{width:100%;padding:12px 15px;border-radius:10px;border:1px solid #23323f;
+    background:#05070C;color:var(--paper);font-family:var(--mono);font-size:13.5px;margin-top:5px}
+  .sheet input:focus{outline:2px solid var(--amber)}
+  .sheet .primaryBtn{width:100%;margin-top:20px;border-radius:10px}
+  .sheet a{color:var(--amber)}
+  #reportBody{font-size:14.5px;line-height:1.8;color:var(--paper)}
+  #reportBody h3{font-size:16px;margin:18px 0 8px;color:var(--amber)}
+  #reportBody li{margin:6px 0 6px 18px}
+  #reportBody code{font-family:var(--mono);background:rgba(233,238,242,.07);padding:1px 6px;border-radius:4px;font-size:13px}
+
+  @media (prefers-reduced-motion:reduce){.wv,#earthRot,.floaty{animation:none}}
+  @media (max-width:900px){.panel{width:100%}.name{font-size:26px}.hud-line{left:50%;max-width:80%}}
+</style>
+</head>
+<body>
+<div class="scene" id="scene">
+  <div class="hud-top"><span>ORBITAL LINK · STATION 7</span><span>ALT 408 KM · <span id="seaTime">--:--</span> SEA</span></div>
+
+  <svg class="sky" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid slice" aria-label="从航天器舷窗看地球">
+    <defs>
+      <radialGradient id="earthDay" cx="38%" cy="34%" r="76%">
+        <stop offset="0%" stop-color="#5EA8E8"/><stop offset="45%" stop-color="#2E6DB0"/>
+        <stop offset="80%" stop-color="#123A66"/><stop offset="100%" stop-color="#0A2140"/>
+      </radialGradient>
+      <linearGradient id="term" x1="0" y1="0" x2="1" y2="0.15">
+        <stop offset="0%" stop-color="#000010" stop-opacity="0"/>
+        <stop offset="52%" stop-color="#020610" stop-opacity="0"/>
+        <stop offset="66%" stop-color="#020408" stop-opacity="0.72"/>
+        <stop offset="100%" stop-color="#01030A" stop-opacity="0.95"/>
+      </linearGradient>
+      <radialGradient id="atmo" cx="50%" cy="50%" r="50%">
+        <stop offset="80%" stop-color="#4FA3E0" stop-opacity="0"/>
+        <stop offset="93%" stop-color="#5AB0F0" stop-opacity="0.32"/>
+        <stop offset="100%" stop-color="#8CCBFF" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="glass" cx="34%" cy="26%" r="82%">
+        <stop offset="0%" stop-color="#1a2634" stop-opacity="0.10"/>
+        <stop offset="70%" stop-color="#05070C" stop-opacity="0"/>
+        <stop offset="100%" stop-color="#000000" stop-opacity="0.55"/>
+      </radialGradient>
+      <clipPath id="port"><circle cx="500" cy="280" r="205"/></clipPath>
+    </defs>
+    <g id="stars"></g>
+    <g clip-path="url(#port)">
+      <rect x="295" y="75" width="410" height="410" fill="#04060B"/>
+      <g id="earthRot">
+        <circle cx="500" cy="280" r="180" fill="url(#earthDay)"/>
+        <g fill="#2C7A55" opacity="0.5">
+          <path d="M420 190 q40 -20 78 -6 q30 12 20 44 q-14 40 -60 44 q-52 4 -66 -34 q-10 -34 28 -48Z"/>
+          <path d="M540 232 q46 -8 70 24 q18 34 -10 62 q-40 34 -84 14 q-30 -20 -18 -58 q10 -34 42 -42Z"/>
+          <path d="M452 330 q34 -6 54 22 q16 30 -14 52 q-38 22 -66 -6 q-20 -30 6 -56 q10 -10 20 -12Z"/>
+        </g>
+        <g id="cities"></g>
+      </g>
+      <circle cx="500" cy="280" r="180" fill="url(#term)"/>
+      <circle cx="500" cy="280" r="192" fill="url(#atmo)"/>
+    </g>
+    <circle id="portGlow" cx="500" cy="280" r="205" fill="none" stroke="#0A1119" stroke-width="46"/>
+    <circle cx="500" cy="280" r="205" fill="url(#glass)"/>
+    <circle cx="500" cy="280" r="228" fill="none" stroke="#1B2A38" stroke-width="10"/>
+    <circle cx="500" cy="280" r="234" fill="none" stroke="#2C3E4E" stroke-width="2"/>
+    <g stroke="#3A4E5E" stroke-width="3" fill="#141E28">
+      <circle cx="500" cy="46" r="7"/><circle cx="734" cy="280" r="7"/>
+      <circle cx="500" cy="514" r="7"/><circle cx="266" cy="280" r="7"/>
+    </g>
+    <circle cx="430" cy="205" r="60" fill="#FFFFFF" opacity="0.03"/>
+  </svg>
+
+  <div class="floaty" id="floaty" style="left:120px;top:150px">☕</div>
+  <div class="ping" id="ping"></div>
+
+  <div class="hud-line" id="hudLine"><span class="tag">REMOTE · JAKE</span></div>
+
+  <div class="drawer-tab" id="drawerTab" onclick="toggleDrawer(true)">通讯记录 LOG</div>
+  <div class="drawer" id="drawer">
+    <div class="drawer-head"><span class="t">COMM LOG · 通讯记录</span><span class="x" onclick="toggleDrawer(false)">✕</span></div>
+    <div id="log"><div class="log-empty" id="logEmpty">建立通讯后，你和 Jake 的对话会以电文形式记录在这里。</div></div>
+  </div>
+
+  <div class="panel" id="panel">
+    <div class="kicker">CImC · GROUND CONTROL</div>
+    <div class="who">
+      <div class="badge" id="haloWrap" title="Jake 说话时点这里可打断">
+        <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-label="Jake">
+          <defs><clipPath id="fc"><circle cx="60" cy="60" r="60"/></clipPath></defs>
+        <g clip-path="url(#fc)">
+          <rect x="0" y="0" width="120" height="120" fill="#0C141C"/>
+          <path d="M14,122 Q20,86 60,84 Q100,86 106,122 Z" fill="#6E4034"/>
+          <g stroke="rgba(0,0,0,.28)" stroke-width="3"><path d="M14,102 Q60,94 106,102" fill="none"/><path d="M40,86 L36,122 M84,86 L88,122" fill="none"/></g>
+          <path d="M46,86 Q60,98 74,86 L74,122 L46,122 Z" fill="#22303D"/>
+          <path d="M50,64 h20 v16 q-10,8 -20,0 Z" fill="#D9A47E"/>
+          <circle cx="37" cy="50" r="5.5" fill="#E3AC81"/><circle cx="83" cy="50" r="5.5" fill="#E3AC81"/>
+          <ellipse cx="60" cy="47" rx="23.5" ry="26" fill="#E3AC81"/>
+          <path d="M40,54 Q44,74 60,75 Q76,74 80,54 Q76,70 60,71 Q44,70 40,54 Z" fill="#6B4A32" opacity=".28"/>
+          <path d="M36,46 Q33,15 60,13 Q87,15 84,46 Q84,28 72,25 Q60,21 48,25 Q36,28 36,46 Z" fill="#5C4030"/>
+          <path d="M45,39 q6,-4 12,-1" stroke="#4A3324" stroke-width="2.6" stroke-linecap="round" fill="none"/>
+          <path d="M63,38 q6,-3 12,1" stroke="#4A3324" stroke-width="2.6" stroke-linecap="round" fill="none"/>
+          <circle cx="51" cy="46.5" r="2.7" fill="#2E241C"/><circle cx="69" cy="46.5" r="2.7" fill="#2E241C"/>
+          <circle cx="52" cy="45.6" r=".9" fill="#fff"/><circle cx="70" cy="45.6" r=".9" fill="#fff"/>
+          <path d="M60,49 q-2.5,6 -3.5,8 q3.5,2.5 7,0" stroke="#C98F66" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+          <path d="M50,62 Q60,70 70,62" stroke="#8A5A3C" stroke-width="2.6" stroke-linecap="round" fill="none"/>
+        </g></svg>
+      </div>
+      <div>
+        <div class="name">Jake</div>
+        <div class="status" id="status">地面控制 · 也懂中文<br>建立通讯，开始今日轨道通话</div>
+      </div>
+    </div>
+
+    <div class="wave" id="wave">
+      <div class="wv" style="height:40%"></div><div class="wv" style="height:70%"></div>
+      <div class="wv" style="height:100%"></div><div class="wv" style="height:55%"></div>
+      <div class="wv" style="height:85%"></div><div class="wv" style="height:30%"></div>
+      <div class="wv" style="height:60%"></div><div class="wv" style="height:95%"></div>
+      <div class="wv" style="height:45%"></div><div class="wv" style="height:75%"></div>
+    </div>
+
+    <div class="conn" id="conn"></div>
+    <div class="timer" id="timer">通讯窗口 <b id="clock">00:00</b> / 30:00</div>
+
+    <div id="prepCard" style="display:none;margin:14px auto 2px;max-width:420px;padding:13px 16px;border-radius:14px;background:rgba(232,162,84,.09);border:1px solid rgba(232,162,84,.35);cursor:pointer;text-align:left">
+      <div style="font-size:13.5px;font-weight:600;color:var(--amber)">📖 今日预习 · 课前半小时</div>
+      <div id="prepTheme" style="font-size:12.5px;color:var(--paper);margin-top:4px;line-height:1.6"></div>
+      <div style="font-size:11px;color:var(--fog);margin-top:4px">点开查看：主题 · 6 个预习表达 · 2 个热身问题。Jake 开场会直接提议聊这个。</div>
+    </div>
+
+    <div class="controls">
+      <button id="btnStart" class="primaryBtn">◉ 建立通讯 · UPLINK</button>
+      <button id="btnZh" onclick="speakChinese()" title="下一句用中文说，说完自动切回英文">🇨🇳 说中文</button>
+      <button id="btnEnd">切断 CLOSE</button>
+    </div>
+    <div class="hint" id="hint"></div>
+    <div class="links">
+      <button class="linkish" id="btnKey">通讯设置</button>
+      <button class="linkish" id="btnNotebook">飞行日志</button>
+    </div>
+  </div>
+
+  <div class="corner"><div class="localt" id="localt">LOCAL --:--</div></div>
+</div>
+
+  <div class="overlay" id="keyOverlay">
+    <div class="sheet">
+      <h2>通讯设置</h2>
+      <div class="sub">
+        填入你的 MiniMax API Key（<a href="https://platform.minimaxi.com" target="_blank">platform.minimaxi.com</a> 注册充值后在「接口密钥」页创建）。<br>
+        钥匙只保存在你本机浏览器里，通过你自己电脑上的后端与服务通信。
+      </div>
+      <label>MiniMax API Key（必填）</label>
+      <input id="keyInput" type="password" placeholder="粘贴你的 MiniMax API Key">
+      <label>GroupId（选填）</label>
+      <input id="groupInput" type="text" placeholder="可留空">
+      <label style="margin-top:18px">你的英文名（Jake 打招呼时怎么称呼你）</label>
+      <input id="unName" type="text" placeholder="比如 Jose，留空则叫 buddy">
+      <label style="margin-top:18px">识别引擎（Jake 用哪只耳朵听你说）</label>
+      <div style="display:flex;gap:14px;margin-top:8px;font-size:13.5px;color:var(--paper);flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="asrEngine" value="xf" checked style="width:auto;margin:0">讯飞</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="asrEngine" value="db" style="width:auto;margin:0">豆包（火山引擎）</label>
+      </div>
+      <div style="font-size:11.5px;color:#5C6B78;margin-top:6px;line-height:1.6">两个都是稳的后端长连接识别，填哪个用哪个。没填对应凭据会自动退回浏览器识别。</div>
+      <button id="btnAsrTest" type="button" style="margin-top:10px;padding:8px 14px;border-radius:10px;border:1px solid rgba(127,181,133,.5);background:rgba(127,181,133,.12);color:var(--green);font-size:13px;cursor:pointer">🔌 测试所选引擎的连接（不用先保存）</button>
+      <div id="asrTestOut" style="font-size:12.5px;line-height:1.7;margin-top:8px;color:var(--fog);white-space:pre-wrap"></div>
+
+      <div style="margin-top:18px;padding:16px 16px 4px;border-radius:12px;background:rgba(232,162,84,.08);border:1px solid rgba(232,162,84,.3)">
+        <div style="font-size:15px;font-weight:600;color:var(--amber);margin-bottom:4px">🎤 讯飞语音识别（让 Jake 听得稳）</div>
+        <div style="font-size:12px;color:var(--fog);line-height:1.7;margin-bottom:6px">去 <a href="https://www.xfyun.cn" target="_blank">xfyun.cn</a> 注册 → 创建应用 → 开通「实时语音转写」→ 复制 APPID 和 APIKey。有免费额度，够用很久。不填则用浏览器识别（可能掉线）。</div>
+        <label style="margin-top:6px">讯飞 APPID</label>
+        <input id="xfAppid" type="text" placeholder="如 595f23df">
+        <label>讯飞 APIKey</label>
+        <input id="xfApikey" type="password" placeholder="实时语音转写服务的 APIKey">
+        <div style="margin-top:12px;padding-top:10px;border-top:1px dashed rgba(232,162,84,.3)">
+          <div style="font-size:13px;font-weight:600;color:var(--amber)">🎯 发音评测（可选 · Jake 真听到你的发音）</div>
+          <div style="font-size:11.5px;color:var(--fog);line-height:1.7;margin:4px 0 2px">在讯飞控制台<b>同一应用</b>里开通「语音评测（流式版）」（每日500次免费），填 WebAPI 的 APIKey 和 APISecret（注意：和上面转写的 APIKey 不是同一个）。填好后 Jake 让你跟读时会自动打分并逐音纠正。</div>
+          <label>评测 APIKey</label>
+          <input id="xfIseKey" type="password" placeholder="WebAPI 的 APIKey">
+          <label>评测 APISecret</label>
+          <input id="xfIseSecret" type="password" placeholder="WebAPI 的 APISecret">
+        </div>
+      </div>
+      <div style="margin-top:14px;padding:16px 16px 4px;border-radius:12px;background:rgba(127,181,133,.08);border:1px solid rgba(127,181,133,.3)">
+        <div style="font-size:15px;font-weight:600;color:var(--green);margin-bottom:4px">🎤 豆包语音识别（火山引擎 · 大模型流式）</div>
+        <div style="font-size:12px;color:var(--fog);line-height:1.7;margin-bottom:6px">去 <a href="https://console.volcengine.com/speech/app" target="_blank">火山引擎语音控制台</a> 创建应用 → 勾选「语音识别大模型 / 流式」→ 复制 App ID 和 Access Token。有免费额度。</div>
+        <label style="margin-top:6px">豆包 App ID</label>
+        <input id="dbAppid" type="text" placeholder="控制台应用的 App ID">
+        <label>豆包 Access Token</label>
+        <input id="dbToken" type="password" placeholder="控制台的 Access Token">
+      </div>
+      <label>Jake 的声音</label>
+      <div id="voiceList" style="margin-top:8px;display:flex;flex-direction:column;gap:4px"></div>
+      <label>音质（高清更自然，是治"AI味"的第一步；极速接话更快）</label>
+      <div style="display:flex;gap:14px;margin-top:8px;font-size:13.5px;color:var(--paper);flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="tqMode" value="hd" checked style="width:auto;margin:0">高清 HD</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="tqMode" value="turbo" style="width:auto;margin:0">极速 Turbo</label>
+      </div>
+      <label>反应节奏（你停顿多久他接话）</label>
+      <div style="display:flex;gap:14px;margin-top:8px;font-size:13.5px;color:var(--paper);flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="paceMode" value="fast" style="width:auto;margin:0">快</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="paceMode" value="normal" checked style="width:auto;margin:0">标准</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="paceMode" value="calm" style="width:auto;margin:0">从容</label>
+      </div>
+      <button class="primaryBtn" id="keySave">保存</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="reportOverlay">
+    <div class="sheet">
+      <h2>飞行复盘 · 今日轨道</h2>
+      <div class="sub" id="reportDate"></div>
+      <div id="reportBody">正在整理今天的收获…</div>
+      <div style="display:flex;gap:10px;margin-top:22px">
+        <button class="primaryBtn" id="btnSaveReport" style="width:auto;flex:1;margin-top:0">💾 存入日志</button>
+        <button id="btnCloseReport" class="primaryBtn" style="flex:1;background:transparent;color:var(--fog);border-color:#23323f">收好了</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="nbOverlay">
+    <div class="sheet">
+      <h2>飞行日志</h2>
+      <div class="sub">每次轨道通话的复盘自动记在这里（存于本机浏览器）。</div>
+      <div id="nbList"></div>
+      <button class="primaryBtn" style="margin-top:22px" onclick="document.getElementById('nbOverlay').style.display='none'">关闭</button>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const VOICES=[['English_magnetic_voiced_man','磁性男声 · 低沉有魅力（默认）'],['English_FriendlyPerson','邻家老友 · 亲切自然'],
+ ['English_DecentYoungMan','体面青年 · 清爽干净'],['English_Steadymentor','沉稳导师 · 慢条斯理'],
+ ['English_ManWithDeepVoice','深嗓男声 · 电台质感'],['English_CaptivatingStoryteller','讲故事的人 · 抑扬顿挫']];
+const SESSION_MIN=30, WRAP_MIN=26;
+let mem={};
+function sGet(k){try{return localStorage.getItem(k)||''}catch{return mem[k]||''}}
+function sSet(k,v){mem[k]=v;try{localStorage.setItem(k,v)}catch{}}
+function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
+
+/* 「测试连接」：让服务器亲自去连识别后端，把原始结果端上来 */
+async function asrTest(){
+  const out=$('asrTestOut'); out.style.color='var(--fog)'; out.textContent='测试中…';
+  const eng=(document.querySelector('input[name=asrEngine]:checked')||{}).value||'xf';
+  try{
+    const dg=await fetch('/api/diag');
+    if(!dg.ok){ out.style.color='var(--amber)';
+      out.textContent='❌ 服务器还是旧版本（没有诊断接口）。\n请：1) 彻底关掉黑色命令行窗口  2) 确认用的是最新解压的文件夹  3) 重新双击启动脚本  4) 回到本页按 Ctrl+F5 强刷新'; return; }
+    const dj=await dg.json();
+    if(eng==='db' && !dj.doubao_loaded){ out.style.color='var(--amber)';
+      out.textContent='❌ server 没加载豆包模块：'+(dj.doubao_error||'doubao.py 不在 server.py 旁边')+'\n把 doubao.py 放到 server.py 同一文件夹后，重启启动脚本。'; return; }
+    let q;
+    if(eng==='db') q='engine=db&appid='+encodeURIComponent($('dbAppid').value.trim())+'&token='+encodeURIComponent($('dbToken').value.trim());
+    else q='engine=xf&appid='+encodeURIComponent($('xfAppid').value.trim())+'&apikey='+encodeURIComponent($('xfApikey').value.trim());
+    const r=await fetch('/api/asr_test?'+q); const j=await r.json();
+    out.style.color=j.ok?'var(--green)':'var(--amber)';
+    out.textContent=(j.ok?'✅ ':'❌ ')+j.detail+'\n（server build '+dj.build+'，豆包模块'+(dj.doubao_loaded?'已加载':'未加载')+'）';
+  }catch(e){ out.style.color='var(--amber)'; out.textContent='❌ 联系不上本地服务器：'+e+'\n黑色命令行窗口是不是关了？重新双击启动脚本。'; }
+}
+function paceMs(){return {fast:450,normal:600,calm:1000}[sGet('mm_pace')||'normal']||600}
+function seaTick(){$('seaTime').textContent=new Date().toLocaleTimeString('en-US',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit'})}
+seaTick();setInterval(seaTick,30000);
+const setStatus=t=>$('status').innerHTML=t;
+/* 舷窗状态：把 idle/listening/thinking/speaking 映射到场景+控制台+HUD+音效 */
+function setHalo(s){
+  const panel=$('panel');
+  panel.className='panel '+(s||'');
+  const wave=$('wave'); if(wave) wave.style.opacity=(s==='speaking')?1:.35;
+  const st=$('status');
+  if(s==='listening'){ pingStop(); }                 /* Jake字幕留在屏上（跟读目标句要看着念） */
+  else if(s==='thinking'){ pingStart(); }             /* 思考动画照跑，字幕不动 */
+  else if(s==='speaking'){ pingStop(); }
+  else { pingStop(); hudHide(); }
+}
+function hdrs(extra){return Object.assign({'Content-Type':'application/json','X-MM-Key':sGet('mm_key'),'X-MM-Group':sGet('mm_group')},extra||{})}
+
+/* ===== 窗下 HUD 当前句 ===== */
+function hudShow(kind,text){ const h=$('hudLine'); if(!h)return;
+  h.className='hud-line show'+(kind==='local'?' local':'');
+  const tag=kind==='local'?'LOCAL · YOU':'REMOTE · JAKE';
+  h.innerHTML='<span class="tag">'+tag+'</span>'; h.appendChild(document.createTextNode(text)); }
+function hudHide(){ const h=$('hudLine'); if(h) h.className='hud-line'; }
+
+/* ===== 信号往返光点（Jake 思考时）===== */
+let pingRAF=null;
+function pingStart(){ const ping=$('ping'); if(!ping)return; const s=Date.now(),dur=1500;
+  const eX=innerWidth*0.62,eY=innerHeight*0.5,stX=95,stY=innerHeight-120;
+  (function step(){ if(pingRAF===null&&s!==Date.now()){} const p=((Date.now()-s)%dur)/dur;
+    const down=p<0.5,q=down?p*2:(p-0.5)*2;
+    ping.style.left=(down?eX+(stX-eX)*q:stX+(eX-stX)*q)+'px';
+    ping.style.top=(down?eY+(stY-eY)*q:stY+(eY-stY)*q)+'px';
+    ping.style.opacity=Math.sin(p*Math.PI).toFixed(2);
+    pingRAF=requestAnimationFrame(step); })(); }
+function pingStop(){ if(pingRAF){cancelAnimationFrame(pingRAF);pingRAF=null;} const ping=$('ping'); if(ping)ping.style.opacity=0; }
+
+/* ===== 抽屉 ===== */
+function toggleDrawer(open){ $('drawer').classList.toggle('open',open);
+  $('drawerTab').style.opacity=open?0:1;
+  if(open){const l=$('log');l.scrollTop=l.scrollHeight;} }
+
+/* ===== Web Audio 合成音效（纯锦上添花，任何错误都静默跳过，绝不影响通话）===== */
+let AC=null, soundDead=false;
+function ac(){ if(soundDead) return null;
+  if(!AC){ try{ AC=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ soundDead=true; return null; } }
+  return AC; }
+let hum=null,humGain=null;
+function startHum(){ try{ const c=ac(); if(!c||hum)return;
+  hum=c.createOscillator(); const g=c.createGain(); humGain=g;
+  hum.type='sine'; hum.frequency.value=58;
+  const lfo=c.createOscillator(),lg=c.createGain(); lfo.frequency.value=0.3; lg.gain.value=6;
+  lfo.connect(lg); lg.connect(hum.frequency);
+  g.gain.value=0; hum.connect(g); g.connect(c.destination);
+  hum.start(); lfo.start(); g.gain.linearRampToValueAtTime(0.035,c.currentTime+2);
+}catch(e){ soundDead=true; } }
+function stopHum(){ try{ const c=ac(); if(!c||!humGain)return;
+  humGain.gain.linearRampToValueAtTime(0,c.currentTime+0.4);
+  setTimeout(()=>{if(hum){try{hum.stop()}catch(e){}hum=null;}},500);
+}catch(e){} }
+function beep(freq,t,dur,vol){ try{ const c=ac(); if(!c)return;
+  const o=c.createOscillator(),g=c.createGain(); o.type='square'; o.frequency.value=freq;
+  o.connect(g); g.connect(c.destination); g.gain.value=0;
+  g.gain.setValueAtTime(0,c.currentTime+t);
+  g.gain.linearRampToValueAtTime(vol||0.06,c.currentTime+t+0.01);
+  g.gain.linearRampToValueAtTime(0,c.currentTime+t+dur);
+  o.start(c.currentTime+t); o.stop(c.currentTime+t+dur+0.05);
+}catch(e){} }
+function chime(freq,t,dur){ try{ const c=ac(); if(!c)return;
+  const o=c.createOscillator(),g=c.createGain(); o.type='sine'; o.frequency.value=freq;
+  o.connect(g); g.connect(c.destination); g.gain.value=0;
+  g.gain.setValueAtTime(0,c.currentTime+t);
+  g.gain.linearRampToValueAtTime(0.14,c.currentTime+t+0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001,c.currentTime+t+dur);
+  o.start(c.currentTime+t); o.stop(c.currentTime+t+dur+0.05);
+}catch(e){} }
+function playEntranceSound(){ try{ const c=ac(); if(!c)return;
+  if(c.state==='suspended') c.resume();
+  startHum();
+  beep(620,0.3,0.08); beep(740,0.55,0.08); beep(880,0.8,0.08);
+  chime(1320,1.15,1.2); chime(1760,1.18,0.9);
+}catch(e){} }
+function playCloseSound(){ try{ const c=ac(); if(!c)return;
+  chime(440,0,0.4); beep(300,0.15,0.12,0.05); stopHum();
+}catch(e){} }
+function playWrapPing(){ try{ beep(520,0,0.3,0.05); beep(400,0.32,0.4,0.05); }catch(e){} }
+
+/* ---------- 状态 ---------- */
+let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
+    active=false, phase='idle', curEmotion='',
+    audioQueue=[], playing=false, curAudio=null, genDone=true, interrupted=false,
+    asrWS=null, audioCtx=null, micNode=null, micStream=null,
+    finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
+const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
+
+/* ---------- 设置弹窗 ---------- */
+$('btnKey').onclick=()=>{
+  $('keyInput').value=sGet('mm_key'); $('groupInput').value=sGet('mm_group');
+  $('xfAppid').value=sGet('xf_appid'); $('xfApikey').value=sGet('xf_apikey');
+  $('dbAppid').value=sGet('db_appid'); $('dbToken').value=sGet('db_token');
+  $('unName').value=sGet('user_name');
+  $('xfIseKey').value=sGet('xf_ise_key'); $('xfIseSecret').value=sGet('xf_ise_secret');
+  const eng=sGet('asr_engine')||'xf';
+  document.querySelectorAll('input[name=asrEngine]').forEach(r=>r.checked=(r.value===eng));
+  const pace=sGet('mm_pace')||'normal';
+  document.querySelectorAll('input[name=paceMode]').forEach(r=>r.checked=(r.value===pace));
+  const tq=sGet('mm_tq')||'hd';
+  document.querySelectorAll('input[name=tqMode]').forEach(r=>r.checked=(r.value===tq));
+  renderVoices(); $('keyOverlay').style.display='flex';
+};
+function renderVoices(){
+  const cur=jakeVoice(), box=$('voiceList'); box.innerHTML='';
+  VOICES.forEach(([id,label])=>{
+    const row=document.createElement('label');
+    row.style.cssText='display:flex;align-items:center;gap:10px;margin:0;padding:9px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer;color:var(--paper);font-size:13.5px';
+    row.innerHTML='<input type="radio" name="voicePick" value="'+id+'" style="width:auto;margin:0" '+(id===cur?'checked':'')+'><span style="flex:1">'+label+'</span><button type="button" data-vid="'+id+'" style="padding:5px 14px;font-size:12.5px">▶ 试听</button>';
+    box.appendChild(row);
+  });
+  box.onclick=async e=>{
+    const b=e.target.closest('button'); if(!b)return; e.preventDefault();
+    if($('keyInput').value.trim()) sSet('mm_key',$('keyInput').value.trim());
+    if(!sGet('mm_key')){alert('先填 API Key 才能试听');return;}
+    const old=b.textContent; b.textContent='…'; b.disabled=true;
+    try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '');
+      const a=new Audio(URL.createObjectURL(blob)); a.onended=()=>{b.textContent=old;b.disabled=false}; await a.play();
+    }catch(err){alert('试听失败：'+err.message);b.textContent=old;b.disabled=false}
+  };
+}
+$('keySave').onclick=()=>{
+  const v=$('keyInput').value.trim(); if(!v){alert('请粘贴 MiniMax API Key');return;}
+  sSet('mm_key',v); sSet('mm_group',$('groupInput').value.trim());
+  sSet('xf_appid',$('xfAppid').value.trim()); sSet('xf_apikey',$('xfApikey').value.trim());
+  sSet('db_appid',$('dbAppid').value.trim()); sSet('db_token',$('dbToken').value.trim());
+  sSet('user_name',$('unName').value.trim());
+  sSet('xf_ise_key',$('xfIseKey').value.trim()); sSet('xf_ise_secret',$('xfIseSecret').value.trim());
+  const eng=document.querySelector('input[name=asrEngine]:checked'); sSet('asr_engine',eng?eng.value:'xf');
+  const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
+  const tq=document.querySelector('input[name=tqMode]:checked'); sSet('mm_tq',tq?tq.value:'hd');
+  const voice=document.querySelector('input[name=voicePick]:checked'); if(voice)sSet('mm_voice',voice.value);
+  $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 可以打电话了。');
+};
+
+/* ---------- 后端 API ---------- */
+async function tts(text, vid, emotion, modelOverride){
+  /* 音质档位：高清hd（默认）/ 极速turbo。语言增强按句子成分智能选：
+     纯英文→English（韵律地道）；中文为主→Chinese（治中文AI味）；混合→auto */
+  const model = modelOverride || ((sGet('mm_tq')||'hd')==='turbo' ? 'speech-2.8-turbo' : 'speech-2.8-hd');
+  const cjk=(text.match(/[\u4e00-\u9fff]/g)||[]).length;
+  const latin=(text.match(/[a-zA-Z]/g)||[]).length;
+  let boost='auto';
+  if(cjk===0) boost='English';
+  else if(cjk>latin) boost='Chinese';
+  const r=await fetch('/api/tts',{method:'POST',headers:hdrs(),
+    body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
+      model, language_boost: boost})});
+  if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
+  return await r.blob();
+}
+async function chatStream(messages, onSentence){
+  const r=await fetch('/api/chat',{method:'POST',headers:hdrs(),body:JSON.stringify({messages})});
+  if(!r.ok) throw new Error('对话失败 '+r.status);
+  const reader=r.body.getReader(), dec=new TextDecoder();
+  let full='',pending='',emoDone=false,emoBuf='',firstOut=false;
+  const SENT=/[.!?。！？]["')」』]?\s*$/, SOFT=/[,;:.!?，。！？；：…]["')」』]?\s*$/;
+  function absorb(t){
+    if(!emoDone){ emoBuf+=t; const m=emoBuf.match(/^\s*\[(\w+)\]\s*/);
+      if(m){const e=m[1].toLowerCase(); if(EMOTIONS.includes(e))curEmotion=(e==='neutral'?'':e); emoDone=true; t=emoBuf.slice(m[0].length); emoBuf='';}
+      else if(emoBuf.length>24){emoDone=true;t=emoBuf;emoBuf='';} else return; }
+    pending+=t; full+=t;
+    if(!firstOut && pending.trim().length>=10 && SOFT.test(pending)){onSentence(pending.trim());pending='';firstOut=true;return;}
+    if(pending.length>=18 && SENT.test(pending)){onSentence(pending.trim());pending='';firstOut=true;}
+  }
+  while(true){
+    const {done,value}=await reader.read(); if(done)break;
+    const chunk=dec.decode(value,{stream:true});
+    if(chunk.includes('[[ERROR]]')) throw new Error(chunk.split('[[ERROR]]')[1]||'服务出错');
+    absorb(chunk);
+    if(interrupted){try{reader.cancel()}catch{};break;}
+  }
+  if(emoBuf.trim()&&!interrupted){pending+=emoBuf;full+=emoBuf;}
+  if(pending.trim()&&!interrupted)onSentence(pending.trim());
+  return full.trim();
+}
+
+/* ---------- 语音合成播放队列 ---------- */
+let ttsErrShown=false, replySeg=0;
+const SOUND_OK={'laughs':'(laughs)','laugh':'(laughs)','laughing':'(laughs)','chuckle':'(chuckle)','chuckles':'(chuckle)','chuckling':'(chuckle)','giggles':'(chuckle)','sighs':'(sighs)','sigh':'(sighs)','sighing':'(sighs)','breath':'(breath)','emm':'(emm)'};
+function sanitizeSpeech(t){
+  /* 声音标签白名单归一（TTS能渲染成真实声音）；其余括号舞台说明剥掉不念 */
+  return t.replace(/\(\s*([a-z' ]{2,24})\s*\)/ig,(m,w)=>{
+    const k=w.trim().toLowerCase();
+    if(SOUND_OK[k]) return SOUND_OK[k];
+    if(/^(smiles?|grins?|winks?|nods?|pauses?|shrugs?|smiling|thinking|whispers?|clears throat|coughs?|snorts?)$/.test(k)) return '';
+    return m;   // 正常的括号内容（如补充说明）保留
+  });
+}
+function enqueueSpeech(text){
+  /* Jake 在要求跟读的回合末尾埋 [echo: 目标句]，读出来之前剥掉并记下目标 */
+  text=text.replace(/\[\s*echo\s*:\s*([^\]]+)\]/ig,(m,p)=>{pendingEcho=p.trim();return '';});
+  text=sanitizeSpeech(text);
+  if(!text.trim()) return;
+  /* 双重确认保险：垫词已替他说过"OK"，若首句仍是纯反应词就跳过不念 */
+  if(replySeg===0 && /^(oh[,!]?\s*)?(ok(ay)?|right( right)?|nice( one)?|perfect|great|awesome|alright|got it|love (that|it)|wow|exactly|totally|sweet|cool)[.!,]?$/i.test(text.trim())) return;
+  /* 首句抢跑只对英文生效（差异听不出）；含中文的句子一律高清，治中文AI味 */
+  const isFirst = (replySeg++===0);
+  const hasCJK = /[\u4e00-\u9fff]/.test(text);
+  const override = (isFirst && !hasCJK) ? 'speech-2.8-turbo' : null;
+  audioQueue.push(tts(text,null,curEmotion,override).catch(err=>{
+    if(!ttsErrShown){ ttsErrShown=true;
+      setStatus('⚠️ 语音合成失败：'+err.message+'<br><span style="font-size:11px">若提示 1004/GroupId，去通讯设置里补填 GroupId</span>'); }
+    return null; }));
+  pumpQueue();
+}
+async function prepFillers(){
+  /* 两池分工：
+     acks   = 老师式接话确认，用户一说完 100% 立刻播一个 → 消灭"接话慢"的体感
+     thinks = 思考音，只用于 Jake 说话中途生成卡顿时填缝 */
+  const acks=['OK!','Mm-hm.','Right.','Alright—','Ah, okay.','Oh, nice.','Got it.'];
+  const thinks=['Hmm...','Mm...','(emm)','So—','Well—','Uh, let me see...','Right, so—','And, um—'];
+  for(const t of acks){ try{ ackBlobs.push(await tts(t,null,'')); }catch(e){} }
+  for(const t of thinks){ try{ fillerBlobs.push(await tts(t,null,'')); }catch(e){} }
+}
+let lastFiller=-1, lastAck=-1;
+function playFiller(){
+  /* 用户刚说完 → 立刻给一声老师式确认，零等待接话 */
+  if(!ackBlobs.length) return;
+  let i; do{ i=Math.floor(Math.random()*ackBlobs.length); }while(ackBlobs.length>1&&i===lastAck);
+  lastAck=i;
+  audioQueue.push(Promise.resolve(ackBlobs[i])); pumpQueue();
+}
+let gapFills=0;
+async function pumpQueue(){
+  if(playing)return; playing=true; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（点头像可打断）'); phase='speaking';
+  while(audioQueue.length&&!interrupted){
+    const blob=await audioQueue.shift(); if(!blob||interrupted)continue;
+    await playBlob(blob);
+  }
+  playing=false;
+  if(genDone&&!audioQueue.length&&active&&!interrupted){ startListening(); return; }
+  /* 队列空了但大脑还在生成 → 别冷场，隔一拍轻轻"嗯…"一声填住（每条回复最多补2次） */
+  if(!genDone&&active&&!interrupted&&gapFills<2){
+    gapFills++;
+    setTimeout(()=>{
+      if(!genDone&&active&&!interrupted&&!playing&&!audioQueue.length&&fillerBlobs.length){
+        let i; do{ i=Math.floor(Math.random()*fillerBlobs.length); }while(fillerBlobs.length>1&&i===lastFiller);
+        lastFiller=i; audioQueue.push(Promise.resolve(fillerBlobs[i])); pumpQueue();
+      }
+    },650);
+  }
+}
+
+/* 播放一段语音；被浏览器自动播放策略拦截时，提示用户点一下解锁并在点击后重播 */
+let audioUnlocked=false;
+function playBlob(blob){
+  return new Promise(res=>{
+    curAudio=new Audio(URL.createObjectURL(blob));
+    curAudio.onended=()=>{audioUnlocked=true;res();};
+    curAudio.onerror=()=>{ setStatus('⚠️ 音频播放出错（设备/驱动问题）'); res(); };
+    curAudio.play().then(()=>{audioUnlocked=true;}).catch(err=>{
+      if(!audioUnlocked){
+        setStatus('🔊 浏览器拦了声音 · <b>请点击页面任意位置解锁</b>');
+        const once=()=>{ document.removeEventListener('pointerdown',once);
+          curAudio.play().then(()=>{audioUnlocked=true;setStatus('TRANSMISSION · Jake 正在说…');}).catch(()=>res()); };
+        document.addEventListener('pointerdown',once);
+        curAudio.onended=()=>{audioUnlocked=true;res();};
+      } else { res(); }
+    });
+  });
+}
+$('haloWrap').onclick=()=>{
+  if(phase!=='speaking')return;
+  interrupted=true; if(curAudio){try{curAudio.pause()}catch{}curAudio=null;} audioQueue=[]; playing=false;
+  history.push({role:'user',content:'(The learner interrupted you mid-sentence — let them speak.)'});
+  startListening();
+};
+
+/* ---------- 麦克风 → 后端 WebSocket 识别 ---------- */
+let micPipeOk=false;   // WebAudio采集管线是否可用（不可用则必须走备用识别）
+async function openMic(){
+  micPipeOk=false;
+  try{
+    micStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+  }catch(e){ /* 没给权限，备用识别会自己再申请 */ }
+  try{
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+    const src=audioCtx.createMediaStreamSource(micStream);
+    micNode=audioCtx.createScriptProcessor(4096,1,1);
+    src.connect(micNode); micNode.connect(audioCtx.destination);
+    micNode.onaudioprocess=e=>{
+      if(phase!=='listening') return;
+      const f32=e.inputBuffer.getChannelData(0);
+      const i16=new Int16Array(f32.length);
+      for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));i16[i]=s<0?s*32768:s*32767;}
+      /* 跟读评测旁路：Jake 要求跟读时，这轮音频留一份（上限30秒），说完送去发音评测 */
+      if(pendingEcho&&echoChunks.reduce((n,c)=>n+c.length,0)<16000*30) echoChunks.push(i16);
+      if(asrWS&&asrWS.readyState===1) asrWS.send(i16.buffer);
+    };
+    micPipeOk=true;
+  }catch(e){ audioCtx=null; micNode=null; micPipeOk=false; }
+}
+let asrOk=false, asrTries=0, usingFallback=false;
+let pendingEcho=null, echoChunks=[], engQ=null;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
+function failEngine(reason){
+  /* 当前引擎连不上：切队列里下一家（豆包↔讯飞热备份），都没了才退浏览器备用 */
+  const dead=engQ&&engQ.shift();
+  console.warn('识别引擎失效:',dead,reason);
+  asrOk=false; asrTries=0;
+  if(engQ&&engQ.length){
+    $('conn').innerHTML='识别 · 切换备用引擎（'+(engQ[0]==='db'?'豆包':'讯飞')+'）…';
+    setTimeout(connectASR,300);
+  } else startFallbackASR(reason);
+}
+function connectASR(){
+  /* 采集管线（WebAudio）没建起来，就没法给后端送音频 → 必须走备用识别 */
+  if(!micPipeOk){ startFallbackASR('浏览器音频管线未建立（WebAudio 初始化失败）'); return; }
+  const pref=sGet('asr_engine')||'xf';
+  if(!engQ||!engQ.length){
+    engQ=[];
+    const has={db:!!(sGet('db_appid')&&sGet('db_token')), xf:!!(sGet('xf_appid')&&sGet('xf_apikey'))};
+    [pref, pref==='db'?'xf':'db'].forEach(e=>{ if(has[e]) engQ.push(e); });
+    if(!engQ.length){ startFallbackASR('豆包和讯飞的凭据都未填写'); return; }
+  }
+  const engine=engQ[0];
+  const proto=location.protocol==='https:'?'wss':'ws';
+  let url;
+  if(engine==='db'){
+    url=proto+'://'+location.host+'/ws/doubao?appid='+encodeURIComponent(sGet('db_appid'))+'&token='+encodeURIComponent(sGet('db_token'));
+  }else{
+    url=proto+'://'+location.host+'/ws/asr?appid='+encodeURIComponent(sGet('xf_appid'))+'&apikey='+encodeURIComponent(sGet('xf_apikey'));
+  }
+  try{ asrWS=new WebSocket(url); }
+  catch(e){ failEngine('WebSocket 创建失败：'+e); return; }
+  asrWS.binaryType='arraybuffer';
+  asrWS.onmessage=ev=>{
+    let d; try{d=JSON.parse(ev.data)}catch{return;}
+    if(d.type==='ready'){ asrOk=true; asrTries=0;
+      const pref=sGet('asr_engine')||'xf';
+      $('conn').innerHTML='识别连接 <b>已就绪</b>（'+(engine==='db'?'豆包':'讯飞')+(engine!==pref?' · 热备援':'')+'）'; return; }
+    if(d.type==='error'){ failEngine((engine==='db'?'豆包':'讯飞')+'后端报错：'+(d.msg||'未知')); return; }
+    if(d.type==='asr' && phase==='listening'){
+      if(d.final){ finals+=d.text+' '; showPartial(''); armSilence(Math.min(350,paceMs())); }
+      else { showPartial(d.text); armSilence(); }
+    }
+  };
+  asrWS.onclose=()=>{
+    if(!active||usingFallback) return;
+    asrTries++;
+    if(asrOk && asrTries<4){ $('conn').innerHTML='识别连接 · 重连中…'; setTimeout(connectASR,800); }
+    else if(!asrOk){
+      failEngine('通道「'+(engine==='db'?'/ws/doubao':'/ws/asr')+'」在就绪前被关闭（server 未重启/路由缺失/后端拒绝）');
+    }
+    else { failEngine('重连 '+asrTries+' 次未成功'); }
+  };
+  asrWS.onerror=()=>{};
+}
+
+/* 安全网：后端识别不可用时，退回浏览器自带识别。
+   浏览器同一时刻只允许一个识别实例，因此采用：单引擎英文为主 +
+   「中文」按钮让下一句用中文听、说完自动弹回英文。 */
+let fbRec=null, fbActive=false, fbLang='en-US', fbWatch=null;
+
+function startFallbackASR(reason){
+  if(usingFallback) return;
+  usingFallback=true;
+  if(reason){ console.warn('退回备用识别，原因：', reason);
+    setStatus('⚠ 后端识别没接上，已临时用浏览器识别。<br><span style="font-size:11px;color:var(--amber)">原因：'+reason+'</span>'); }
+  try{if(asrWS){asrWS.onclose=null;asrWS.close();asrWS=null;}}catch{}
+  try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;micNode=null;}}catch{}
+  try{if(audioCtx){audioCtx.close();audioCtx=null;}}catch{}
+  try{if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}}catch{}
+  $('conn').innerHTML='识别 · <b style="color:var(--amber)">浏览器备用模式</b>'
+    +(reason?'<div style="font-size:10.5px;color:var(--amber);opacity:.85;line-height:1.5;max-width:340px;margin-top:2px">原因：'+reason+'</div>':'');
+  if(reason) $('conn').title=reason;
+  $('btnZh').style.display='inline-block';
+  if(!('webkitSpeechRecognition' in window||'SpeechRecognition' in window)){
+    setStatus('这个浏览器不支持备用识别，请改用 Edge/Chrome。'); return;
+  }
+  /* 耳朵看门狗：只要轮到用户说话，每2.5秒确认识别引擎活着，死了立刻复活 */
+  clearInterval(fbWatch);
+  fbWatch=setInterval(()=>{
+    if(active&&usingFallback&&phase==='listening'&&!fbActive) fbStart();
+  },2500);
+  if(phase==='listening') fbStart();
+}
+
+function fbStart(){
+  if(!usingFallback||!active||fbActive) return;
+  fbActive=true;
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  fbRec=new SR(); fbRec.lang=fbLang; fbRec.continuous=true; fbRec.interimResults=true;
+  fbRec.onresult=e=>{
+    if(phase!=='listening') return;
+    let interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal){ finals+=e.results[i][0].transcript+' '; }
+      else interim+=e.results[i][0].transcript;
+    }
+    const live=(finals+interim).trim();
+    if(live) showPartial(live);
+    if(live) armSilence();
+  };
+  fbRec.onend=()=>{ fbActive=false;
+    if(usingFallback&&active&&phase==='listening') setTimeout(fbStart,250); };
+  fbRec.onerror=()=>{ fbActive=false; };
+  try{ fbRec.start(); }catch(e){ fbActive=false; setTimeout(fbStart,500); }
+}
+
+function fbStop(){
+  fbActive=false;
+  if(fbRec){ try{fbRec.onend=null; fbRec.abort();}catch{} fbRec=null; }
+}
+
+/* 一键中文：下一句用中文听，说完自动弹回英文 */
+function speakChinese(){
+  if(!usingFallback||!active) return;
+  fbLang='zh-CN';
+  $('btnZh').classList.add('on'); $('btnZh').textContent='🎙 中文听写中…';
+  setStatus('好，这句说中文 · 停半秒再开口更稳，说完自动切回英文');
+  if(phase==='listening'){ fbStop(); finals=''; lastPartial=''; setTimeout(fbStart,400); }
+}
+function fbRevertLang(){
+  if(fbLang!=='en-US'){ fbLang='en-US';
+    $('btnZh').classList.remove('on'); $('btnZh').textContent='🇨🇳 说中文'; }
+}
+let lastPartial='';   // 屏幕上最新显示的完整识别文字（含未定稿的临时结果）
+function showPartial(t){
+  if(!t){ if(partialEl){partialEl.remove();partialEl=null;} lastPartial=''; return; }
+  lastPartial=t;
+  const empty=$('logEmpty'); if(empty) empty.remove();
+  if(!partialEl){ partialEl=document.createElement('div'); partialEl.className='msg me partial';
+    partialEl.innerHTML='<span class="who">LOCAL · YOU</span>'; $('log').appendChild(partialEl); }
+  partialEl.textContent=''; partialEl.innerHTML='<span class="who">LOCAL · YOU</span>'; partialEl.appendChild(document.createTextNode(t));
+  $('log').scrollTop=$('log').scrollHeight;
+}
+function armSilence(ms){ clearTimeout(silenceTimer); silenceTimer=setTimeout(finishTurn,ms||paceMs()); }
+async function finishTurn(){
+  if(phase!=='listening')return;
+  /* 关键：说完这轮，取"屏幕上实际显示的完整文字"。
+     浏览器识别中文常只给临时结果、迟迟不定稿，若只读 finals 会拿到空串 → Jake 收不到你的话。
+     finals 是已定稿部分，lastPartial 是含临时结果的完整显示；谁更全用谁。 */
+  const a=finals.trim(), b=lastPartial.trim();
+  const text=(b.length>a.length ? b : a);
+  finals=''; lastPartial='';
+  showPartial('');
+  if(usingFallback){ fbStop(); fbRevertLang(); }
+  if(!text){ pendingEcho=null; echoChunks=[]; return; }
+  /* 跟读评测：Jake 埋了目标句且这轮录到了足够音频（≥0.4秒），先打分再交给 Jake */
+  const phrase=pendingEcho; pendingEcho=null;
+  const chunks=echoChunks; echoChunks=[];
+  const nSamples=chunks.reduce((n,c)=>n+c.length,0);
+  if(phrase&&nSamples>=6400&&sGet('xf_ise_key')&&sGet('xf_ise_secret')&&sGet('xf_appid')){
+    setStatus('SCORING · 正在评测你的发音…');
+    const rep=await iseEvaluate(phrase,chunks);
+    if(rep){
+      addScore(rep.human);
+      handleUserSpeech(text+'\n\n'+rep.forJake, text);
+      return;
+    }
+  }
+  handleUserSpeech(text);
+}
+function pcmToB64(chunks){
+  let len=0; for(const c of chunks) len+=c.byteLength;
+  const u8=new Uint8Array(len); let o=0;
+  for(const c of chunks){ u8.set(new Uint8Array(c.buffer,c.byteOffset,c.byteLength),o); o+=c.byteLength; }
+  let s=''; for(let i=0;i<u8.length;i+=8192) s+=String.fromCharCode.apply(null,u8.subarray(i,i+8192));
+  return btoa(s);
+}
+async function iseEvaluate(phrase,chunks){
+  try{
+    const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
+    const r=await fetch('/api/ise',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
+      body:JSON.stringify({appid:sGet('xf_appid'),apikey:sGet('xf_ise_key'),apisecret:sGet('xf_ise_secret'),
+                           text:phrase,pcm:pcmToB64(chunks)})});
+    clearTimeout(t);
+    const j=await r.json();
+    if(!j.ok){ console.warn('评测失败:',j.detail); addScore('📊 发音评测没成功：'+(j.detail||'未知原因')); return null; }
+    /* 给用户看的一行 */
+    let human='📊 跟读评分 '+j.total+'/100 · 准确 '+j.accuracy+' · 流利 '+j.fluency;
+    const bad=(j.words||[]).filter(w=>w.bad&&w.bad.length||w.score!==null&&w.score<70);
+    if(bad.length) human+=' · 需注意: '+bad.map(w=>w.w+(w.bad&&w.bad.length?'('+w.bad.join(',')+')':'')).join(' ');
+    if(j.rejected) human='📊 这段没听清（可能有杂音或跑题），Jake 会让你再试一次';
+    /* 给Jake看的报告 */
+    let forJake='[PRONUNCIATION REPORT for "'+phrase+'": total '+j.total+'/100, accuracy '+j.accuracy+', fluency '+j.fluency;
+    if(bad.length) forJake+='; problem words: '+bad.map(w=>'"'+w.w+'"'+(w.score!==null?' '+w.score+'/100':'')+(w.bad&&w.bad.length?' (phones off: '+w.bad.join(', ')+')':'')).join('; ');
+    else forJake+='; all words clean';
+    if(j.rejected) forJake+='; NOTE: engine rejected the read as unclear/off-script — ask for one more try';
+    forJake+=']';
+    return {human,forJake};
+  }catch(e){ console.warn('评测异常:',e); return null; }
+}
+function addScore(text){
+  transcript.push({role:'system',text});
+  const empty=$('logEmpty'); if(empty) empty.remove();
+  const d=document.createElement('div');
+  d.style.cssText='margin:6px 0;padding:7px 12px;border-radius:10px;background:rgba(127,181,133,.1);border:1px solid rgba(127,181,133,.3);font-size:12px;color:var(--green);line-height:1.6';
+  d.textContent=text;
+  const log=$('log'); log.appendChild(d); log.scrollTop=log.scrollHeight;
+}
+function startListening(){ if(!active)return; interrupted=false; finals=''; lastPartial=''; echoChunks=[]; clearTimeout(silenceTimer);
+  phase='listening'; setHalo('listening');
+  if(usingFallback) fbStart();   // 备用模式：轮到你了才开耳朵
+  setStatus('到你了 · 英语中文随便说，停顿约 '+(paceMs()/1000).toFixed(1).replace('.0','')+' 秒就轮到他'); }
+
+async function handleUserSpeech(text,displayText){
+  addLine('user',displayText||text);
+  phase='thinking'; setHalo('thinking'); setStatus('Jake 在想…'); interrupted=false; genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+  playFiller();
+  try{
+    history.push({role:'user',content:text});
+    if(history.length>40) history.splice(1,2);
+    const full=await chatStream(history, s=>enqueueSpeech(s));
+    genDone=true;
+    if(full){history.push({role:'assistant',content:full});
+      addLine('assistant',cleanForDisplay(full));}
+    pumpQueue();
+  }catch(err){ genDone=true; setHalo(''); setStatus('出了点状况：'+err.message+'<br>直接继续说即可'); startListening(); }
+}
+function cleanForDisplay(t){
+  return t.replace(/\[\s*echo\s*:[^\]]*\]/ig,'')
+          .replace(/\(\s*(laughs?|laughing|chuckles?|chuckling|giggles?|sighs?|sighing|breath|emm|smiles?|grins?|winks?|nods?|pauses?|shrugs?|whispers?|clears throat|coughs?)\s*\)/ig,'')
+          .replace(/\s{2,}/g,' ').trim();
+}
+function addLine(role,text){
+  transcript.push({role,text});
+  const empty=$('logEmpty'); if(empty) empty.remove();
+  const d=document.createElement('div'); d.className='msg '+(role==='assistant'?'jake':'me');
+  d.innerHTML='<span class="who">'+(role==='assistant'?'REMOTE · JAKE':'LOCAL · YOU')+'</span>';
+  d.appendChild(document.createTextNode(text));
+  $('log').appendChild(d); $('log').scrollTop=$('log').scrollHeight;
+  /* 定稿的句子推到窗下 HUD */
+  if(role==='assistant') hudShow('remote',text);   /* 只有Jake的话上字幕，常驻到下一段 */
+}
+
+/* ---------- 人设 ---------- */
+const PERSONA=`You are Jake, a 38-year-old American from Seattle who works in tech. You are a highly educated native speaker with total command of English — if you took the IELTS you'd score 8.5+ effortlessly. You lived in Beijing for five years, so your Mandarin is fluent. You are on a casual voice call with your friend — an adult Chinese English learner. You are NOT a schoolteacher. You are a brilliant friend who happens to be the best English coach he could ask for.
+
+CRITICAL OUTPUT RULES (your words are converted to speech):
+- Output ONLY the words Jake speaks — no markdown, no lists, no asterisks, no stage directions, no emoji. Two exceptions: the emotion tag and sound tags below.
+- START EVERY reply with exactly one emotion tag in square brackets from: [happy] [surprised] [neutral] [sad] [fearful] [angry]. It is consumed by the voice engine, never spoken. Vary it honestly.
+- You may use these sound tags sparingly (at most one per turn), rendered as real sounds — EXACT spellings only: (laughs) (chuckle) (sighs) (breath) (emm). Any other parenthetical — (chuckles), (smiles), (pauses), etc. — is FORBIDDEN and will be spoken as literal words. If a tag doesn't fit, just write the sound as words: "haha", "whew", "oof".
+- Vary rhythm like a real speaker: short punchy sentences, trailing "..." when musing, dashes for self-interruption, genuine reactions ("No way!", "Oh man...").
+- Keep every turn TIGHT: 2-3 SHORT spoken sentences, ONE idea per turn. Long turns overwhelm the learner — if you have two things to teach, save one for the next turn.
+- The system automatically plays a short acknowledgment ("OK", "Mm-hm") the instant they finish speaking, BEFORE your reply arrives. So NEVER open with a standalone reaction word — no "Oh, perfect!", "Nice!", "OK!" openers; that would double up. Dive straight into substance, and keep your FIRST sentence short (under ~8 words) so it reaches their ears fast.
+- HANDOVER RULE (hard rule): the echo request is ALWAYS the LAST thing in your turn. "...your turn — try it once: pick-di-dup." Then STOP. Nothing after it — no commentary, no extra question, no follow-up. You are handing them the mic.
+- Everything you output is spoken aloud on the call. NEVER write inner monologue, self-narration, notes-to-self, or stage directions of any kind.
+- You have a wife, a 7-year-old daughter, a golden retriever named Biscuit, and a coffee addiction.
+
+YOUR ENGLISH LEVEL
+- Speak like a sharp, articulate, educated American: precise word choice, natural idioms, phrasal verbs, varied structures. Casual but never dumbed-down.
+- Deliberately model advanced usage (e.g. "double-edged sword", "I'm on the fence", "it boils down to...", subjunctives) — one or two per turn, naturally.
+- If they didn't catch an advanced phrase, gloss it briefly in simpler English (Chinese only if still lost).
+
+CHINESE SAFETY NET (make the handoff warm, never abrupt)
+- 95% English. When the learner speaks Chinese, is stuck, or asks "XX 用英语怎么说", help in three beats: 1) FIRST a short warm Chinese bridge ("哦～你是说这个啊" / "对对，这个确实不好说"), never jump straight to translation. 2) THEN teach the natural idiomatic English. 3) THEN glide back to English, usually by inviting them to try the phrase.
+- Keep Chinese brief and natural — a bilingual friend, not a translator. Never punish Chinese use.
+
+COACHING DUTIES — the learner EXPLICITLY asked for all three; do them every time they speak English:
+1) LOCAL UPGRADE (nearly every English turn): pick ONE thing they just said and give the way a native would actually put it — "oh, quick one: we'd usually say 'grab lunch', not 'eat lunch'" — even when their sentence was correct. Skip only if their turn was a bare yes/no.
+2) NEVER-EXCUSE ERRORS: tense, aspect, subject-verb agreement, articles, plurals. Scan every turn. If one appears, name it and fix it on the spot ("quick fix — that was yesterday, so 'I went', not 'I go'"). NEVER excuse these as transcription noise when the time context (yesterday, last week, 去年...) makes the intended form obvious. Genuine garbles and wrong-sounding homophones: infer intent and move on without correcting.
+3) SOUND DEMO + ECHO — when you teach a fix or upgrade, briefly note its sound (stress or one linking point, speakable respelling like "pick-di-dup", never IPA). But an ECHO REQUEST ("your turn — try it once") is EARNED, not automatic. Request an echo ONLY when at least one of these is true:
+   a. the phrase is genuinely tricky to say — heavy linking, reductions, or a sound Chinese speakers typically miss (th, æ, v/w, dark L, final consonants);
+   b. it's a high-value native expression worth drilling into muscle memory;
+   c. the learner actually erred — a never-excuse grammar slip, or a PRONUNCIATION REPORT under 85.
+   If none apply, teach in one breath and keep the conversation moving — NO echo. Rhythm check: outside of error corrections, at most one echo every 2-3 of your turns. A call that feels like drill practice is a failed call; it should feel like a great chat where the drills sneak in.
+   MACHINE TAG (silent, mandatory): every time you request an echo, append at the very END of your turn, after everything else: [echo: the exact words they should say]. Plain words only, no respelling inside the tag. It is stripped before speech — never mention it, never read it.
+   PRONUNCIATION REPORT: sometimes the learner's message will contain a [PRONUNCIATION REPORT ...] line. That is REAL acoustic scoring of their echo from a speech evaluator — the ONE channel where you truly know how they sounded. Coach off it like a pro: 85+ → specific praise ("that linking was clean"), move on. Below 85 → pick the WORST word or phone, give ONE concrete articulatory tip (mouth shape, tongue position, lip rounding — e.g. "for æ in grab, drop your jaw more, like the a in 'cat'"), demo slow then natural, and ask for ONE more try (append the [echo: ...] tag again). Max two retries per phrase, then encourage warmly and move on. Never recite the numbers robotically — speak like a coach, not a scoreboard. If the report says the read was rejected/unclear, just ask them to try once more a bit louder.
+   HONESTY RULE: outside of PRONUNCIATION REPORT lines you cannot hear their pronunciation, only recognized text — never claim otherwise. When a report IS present, it is real; trust it.
+- Keep the friend vibe: react first, coach in one breath, then push the conversation forward with a question. One full teach per turn (fix or upgrade + its sound demo + echo request) is plenty. Praise SPECIFIC wins ("your past tense held up through that whole story").
+
+LESSON CONTINUITY (this is a COURSE, not isolated chats)
+{{LESSON}}
+
+TODAY'S CONVERSATION MATERIAL
+You browsed forums this morning over coffee. These are the topics you're genuinely itching to talk about today. Treat them as the BACKBONE of the call, not optional extras:
+
+{{CARDS}}
+
+HOW TO RUN THE CONVERSATION:
+- The learner's English name is {{NAME}} — greet them by name and use it naturally now and then.
+- Open with one short warm CHINESE greeting by name ("哎 {{NAME}}，接通啦！"), then within your FIRST or SECOND turn propose today's topic BY NAME and hand them the choice: "我们今天聊聊【today's planned lesson topic — or the OPENER card if there's no plan】怎么样？还是你有别的想聊的？" Their pick always wins; if they choose their own topic, follow it happily.
+- Once the topic is set, actually discuss it: share your take, ask what they think, react to their answer, weave in the language gems and the preview expressions from the plan. Spend real time here — several exchanges, not one question.
+- Only when a topic runs dry, move to the BACKUP, then the WILDCARD, the same way.
+- A call where you never proposed today's topic in the opening is a failed call.
+
+CONTENT RULES: steer away from extreme politics, race, crime, tragedy, sexual content — deflect lightly.
+
+SESSION (~30 min): on the wrap-up signal or when they need to go, wrap up like a friend, then a short warm recap in mixed English+Chinese covering: the never-excuse errors they made today (tense/agreement/articles/plurals — name each one), the best local-upgrade of the day, and one pronunciation/linking takeaway worth practicing.`;
+
+/* ---------- 通话开始/结束 ---------- */
+$('btnStart').onclick=startCall;
+$('btnAsrTest').onclick=asrTest;
+$('btnEnd').onclick=()=>endCall(true);
+
+/* ===== 体检模式：任何未捕获的错误直接显示在屏幕上 ===== */
+window.onerror=function(msg,src,line){ try{ setStatus('⚠️ 程序错误：'+msg+'（行'+line+'）'); }catch(e){} };
+window.onunhandledrejection=function(ev){ try{ setStatus('⚠️ 异步错误：'+(ev.reason&&ev.reason.message||ev.reason)); }catch(e){} };
+function step(n,txt){ setStatus('['+n+'/4] '+txt); }
+function withTimeout(promise,ms,name){
+  return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error(name+' 超时（'+(ms/1000)+'秒）')),ms))]);
+}
+
+async function startCall(){
+  if(active||$('btnStart').disabled) return;   // 防重复触发
+  if(!sGet('mm_key')){ $('keyOverlay').style.display='flex'; return; }
+  $('prepCard').style.display='none'; $('btnStart').disabled=true;
+  $('btnStart').textContent='◉ 通讯建立中…';   // 按下瞬间立刻给反馈
+  step(1,'接收地面简报 UPLINK…（最多15秒）');
+  setTimeout(()=>{ try{ playEntranceSound(); }catch(e){} },50);  // 音效延后，绝不拖慢首屏反馈
+  try{
+    let cards;
+    try{
+      const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),15000);
+      try{ cards=await fetch('/api/briefing',{method:'POST',headers:hdrs(),body:'{}',signal:ctrl.signal}).then(r=>r.json()); }
+      finally{ clearTimeout(to); }
+    }catch(e){ cards={cards:''}; }
+    if(cards.error) throw new Error('简报：'+cards.error);
+    const cardText = cards.cards || '(No briefing today — just chat naturally.)';
+    history=[{role:'system',content:PERSONA.replace('{{CARDS}}',cardText).replace('{{LESSON}}',buildLessonMemo()).replaceAll('{{NAME}}',sGet('user_name')||'buddy')}];
+    transcript=[]; seconds=0; wrapped=false;
+
+    /* 第2步：麦克风（如果弹权限窗，请点允许；限时20秒） */
+    step(2,'开启麦克风…（如弹出权限窗请点"允许"）');
+    try{ await withTimeout(openMic(),20000,'麦克风授权'); }catch(e){ /* 备用识别会自己再要权限 */ }
+
+    /* 第3步：识别通道 */
+    step(3,'连接识别通道…');
+    connectASR(); prepFillers();
+
+    active=true;
+    $('btnStart').style.display='none'; $('btnEnd').style.display='inline-block';
+    $('timer').style.display='block';
+    $('hint').innerHTML='全程不用碰电脑：他说完自动轮到你，你说完停顿片刻轮到他。他说太长？点头像打断。';
+    startTimer();
+
+    /* 第4步：唤醒 Jake（对 MiniMax 的首次调用，限时40秒） */
+    step(4,'呼叫地面控制 · 唤醒 Jake…（最多40秒）');
+    setHalo('thinking'); phase='thinking';
+    history.push({role:'user',content:'(The call just connected. Open with ONE short warm Chinese greeting like "哎，接通啦！最近咋样啊？" then glide into English small talk. Emotion tag first.)'});
+    genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+    const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（MiniMax对话接口）');
+    genDone=true;
+    if(opening){history.push({role:'assistant',content:opening}); addLine('assistant',cleanForDisplay(opening));}
+    pumpQueue();
+  }catch(err){
+    setStatus('⚠️ 通讯建立失败：'+err.message+'<br><span style="font-size:11px;opacity:.8">把这行字发给开发者即可定位</span>');
+    $('btnStart').disabled=false; $('btnStart').textContent='◉ 建立通讯 · UPLINK'; active=false; cleanup(); renderPrepCard();
+  }
+}
+function startTimer(){
+  tick=setInterval(()=>{
+    seconds++;
+    $('clock').textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
+    if(!wrapped&&seconds>=WRAP_MIN*60){ wrapped=true; playWrapPing();   // 通讯窗口将尽提示音
+      history.push({role:'user',content:'(system note: ~4 minutes left — when natural, wrap up like a friend with the warm English+Chinese recap.)'}); }
+    if(seconds>=SESSION_MIN*60) endCall(true);
+  },1000);
+}
+function cleanup(){
+  try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
+  try{if(audioCtx)audioCtx.close()}catch{}
+  try{if(micStream)micStream.getTracks().forEach(t=>t.stop())}catch{}
+  try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{}
+  try{if(fbRec){fbRec.onend=null;fbRec.abort();}}catch{}
+  clearInterval(fbWatch); fbWatch=null;
+  micNode=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
+  fbLang='en-US'; asrOk=false; asrTries=0;
+  try{$('btnZh').style.display='none';$('btnZh').classList.remove('on');}catch(e){}
+}
+async function endCall(showReport){
+  if(!active)return;
+  active=false; phase='idle'; clearInterval(tick); interrupted=true; clearTimeout(silenceTimer);
+  if(curAudio){try{curAudio.pause()}catch{}} audioQueue=[]; playing=false;
+  cleanup(); playCloseSound();   // 切断信道音效 + 底噪消失
+  setHalo(''); setStatus('通讯已切断 · 下个轨道见'); $('conn').textContent='';
+  $('btnEnd').style.display='none'; $('hint').textContent='';
+  $('btnStart').style.display='inline-block'; $('btnStart').disabled=false; $('btnStart').textContent='◉ 重新建立通讯';
+
+  if(showReport&&transcript.length>1){
+    $('reportOverlay').style.display='flex';
+    const dateStr=new Date().toLocaleDateString('zh-CN')+' '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+    const mins=Math.max(1,Math.round(seconds/60));
+    $('reportDate').textContent=dateStr+' · 本次轨道通话 '+mins+' 分钟';
+    try{
+      const convo=transcript.map(t=>(t.role==='assistant'?'Jake':'学员')+': '+t.text).join('\n');
+      const rep=await fetch('/api/report',{method:'POST',headers:hdrs(),body:JSON.stringify({transcript:convo})}).then(r=>r.json());
+      $('reportBody').innerHTML=mdToHtml(rep.report||rep.error||'生成失败');
+      currentReport={date:dateStr,minutes:mins,report:rep.report||'',transcript:convo.slice(-12000)};
+      nbAdd(currentReport);
+    }catch(e){ $('reportBody').textContent='报告生成失败：'+e.message; }
+  }
+}
+
+/* ---------- 复盘本 ---------- */
+let currentReport=null;
+function nbLoad(){try{return JSON.parse(localStorage.getItem('jake_nb')||'[]')}catch{return[]}}
+
+/* 课程连续性：从上一次复盘里提取"纠错回顾"和"下一课预告"，作为本课教案交给 Jake */
+function extractSection(md,title){
+  const m=(md||'').match(new RegExp('##\\s*'+title+'([\\s\\S]*?)(?=\\n##|$)'));
+  return m? m[1].trim().slice(0,900) : '';
+}
+
+/* ---------- 今日预习卡（主界面） ---------- */
+function renderPrepCard(){
+  const card=$('prepCard'); if(!card) return;
+  const l=nbLoad(); const plan=l.length?extractSection(l[0].report,'下一课预告'):'';
+  if(!plan){ card.style.display='none'; return; }
+  const m=plan.match(/主题[^\n]*/);
+  $('prepTheme').textContent=m?m[0].replace(/^[\s\-\*1-9\)\.、：:]+/,''):'点开查看本课教案';
+  card.style.display='block';
+  card.onclick=()=>{ $('reportDate').textContent='今日预习 · 由上次通话生成';
+    $('reportBody').innerHTML=mdToHtml('## 下一课预告\n'+plan);
+    currentReport=null; $('reportOverlay').style.display='flex'; };
+}
+function buildLessonMemo(){
+  const last=nbLoad()[0];
+  if(!last||!last.report) return "(This is the learner's first session — no prior lesson. Just run today's material.)";
+  const mistakes=extractSection(last.report,'永不豁免错误清单')||extractSection(last.report,'纠错回顾');
+  const plan=extractSection(last.report,'下一课预告');
+  let memo='LAST SESSION ('+last.date+'):\n';
+  if(mistakes) memo+='Mistakes corrected last time (watch if they repeat; praise if fixed):\n'+mistakes+'\n\n';
+  if(plan) memo+="TODAY'S PLANNED LESSON (this is your PRIMARY material today — the hot-topic cards below are backup):\n"+plan+'\n\n';
+  memo+='HOW TO USE: Open the call as usual, then warmly and playfully check if they remember ONE expression from last time (a quick recall, never a test). Then steer into the planned lesson topic and naturally work the preview expressions into the conversation. Notice and specifically praise when they use anything from last session.';
+  return memo;
+}
+function nbSaveAll(l){try{localStorage.setItem('jake_nb',JSON.stringify(l.slice(0,60)))}catch{}}
+function nbAdd(e){const l=nbLoad();l.unshift(e);nbSaveAll(l);}
+$('btnCloseReport').onclick=()=>$('reportOverlay').style.display='none';
+$('btnSaveReport').onclick=()=>{if(currentReport)downloadReport(currentReport)};
+function downloadReport(r){
+  const html='<!DOCTYPE html><meta charset="UTF-8"><title>Jake复盘 '+r.date+'</title>'+
+    '<body style="font-family:sans-serif;max-width:720px;margin:40px auto;padding:0 24px;line-height:1.85;color:#2A2A2A">'+
+    '<h1>☕ 和 Jake 的英语通话复盘</h1><p style="color:#888">'+r.date+' · 约 '+r.minutes+' 分钟</p>'+mdToHtml(r.report)+'</body>';
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([html],{type:'text/html'}));
+  a.download='Jake复盘_'+r.date.replace(/[/:\s]/g,'-')+'.html'; a.click();
+}
+$('btnNotebook').onclick=()=>{renderNB();$('nbOverlay').style.display='flex'};
+function renderNB(){
+  const l=nbLoad(),box=$('nbList'); box.innerHTML='';
+  if(!l.length){box.innerHTML='<div style="color:var(--fog);font-size:14px">还没有记录。</div>';return;}
+  /* 顶部：下一课预习卡（取最近一次复盘里的教案） */
+  const plan=extractSection(l[0].report,'下一课预告');
+  if(plan){
+    const p=document.createElement('div');
+    p.style.cssText='margin-bottom:16px;padding:14px 16px;border-radius:12px;background:rgba(232,162,84,.08);border:1px solid rgba(232,162,84,.3);cursor:pointer';
+    p.innerHTML='<div style="font-size:14px;font-weight:600;color:var(--amber);margin-bottom:4px">📖 下一课预习（点开查看）</div>'
+      +'<div style="font-size:12.5px;color:var(--fog)">上完课想提前准备？主题、预习表达、热身问题都在这。</div>';
+    p.onclick=()=>{ $('reportDate').textContent='下一课教案 · 由上次通话生成';
+      $('reportBody').innerHTML=mdToHtml('## 下一课预告\n'+plan);
+      currentReport=null;
+      $('nbOverlay').style.display='none'; $('reportOverlay').style.display='flex'; };
+    box.appendChild(p);
+  }
+  l.forEach((r,i)=>{const row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);font-size:14px';
+    row.innerHTML='<div style="flex:1"><b>'+r.date+'</b><span style="color:var(--fog)"> · '+r.minutes+' 分钟</span></div>'+
+      '<button data-a="v" data-i="'+i+'" style="padding:7px 16px;font-size:13px">复习</button>'+
+      '<button data-a="d" data-i="'+i+'" style="padding:7px 16px;font-size:13px">下载</button>'+
+      '<button data-a="x" data-i="'+i+'" style="padding:7px 12px;font-size:13px;color:var(--danger)">删</button>';
+    box.appendChild(row);});
+  box.onclick=e=>{const b=e.target.closest('button');if(!b)return;const l=nbLoad(),i=+b.dataset.i,r=l[i];
+    if(b.dataset.a==='v'){currentReport=r;$('reportDate').textContent=r.date+' · '+r.minutes+' 分钟';$('reportBody').innerHTML=mdToHtml(r.report);$('nbOverlay').style.display='none';$('reportOverlay').style.display='flex';}
+    else if(b.dataset.a==='d'){downloadReport(r);}
+    else{l.splice(i,1);nbSaveAll(l);renderNB();}};
+}
+function mdToHtml(md){return md.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/^#+ (.*)$/gm,'<h3>$1</h3>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+  .replace(/`(.+?)`/g,'<code>$1</code>').replace(/^[-*] (.*)$/gm,'<li>$1</li>')
+  .replace(/\n{2,}/g,'<br><br>').replace(/\n/g,'<br>');}
+
+/* ===== 舷窗场景 ===== */
+(function initScene(){
+  var NS='http://www.w3.org/2000/svg';
+  var sf=document.getElementById('stars');
+  for(var i=0;i<100;i++){var c=document.createElementNS(NS,'circle');
+    c.setAttribute('cx',Math.random()*800);c.setAttribute('cy',Math.random()*560);
+    c.setAttribute('r',(Math.random()*1.1+0.2).toFixed(2));c.setAttribute('fill','#AEBECC');
+    c.setAttribute('opacity',(Math.random()*0.7+0.15).toFixed(2));sf.appendChild(c);}
+  var cl=document.getElementById('cities');
+  for(var j=0;j<48;j++){var a=Math.random()*Math.PI*2,r=Math.random()*150+15;
+    var x=500+Math.cos(a)*r,y=280+Math.sin(a)*r*0.85;if(x<505)continue;
+    var d=document.createElementNS(NS,'circle');d.setAttribute('cx',x);d.setAttribute('cy',y);
+    d.setAttribute('r',(Math.random()*1.3+0.4).toFixed(2));d.setAttribute('fill','#FFD489');
+    d.setAttribute('opacity',(Math.random()*0.6+0.3).toFixed(2));cl.appendChild(d);}
+  var now=new Date(),h=now.getHours(),m=now.getMinutes();
+  var earth=document.getElementById('earthRot');
+  var baseAngle=(h*60+m)/1440*360, t0=Date.now();
+  earth.style.transformOrigin='500px 280px';
+  (function spin(){var el=(Date.now()-t0)/1000,ang=baseAngle+el*(360/90);
+    earth.setAttribute('transform','rotate('+ang.toFixed(2)+' 500 280)');requestAnimationFrame(spin);})();
+  var night=(h<6||h>=19);
+  document.getElementById('localt').textContent='LOCAL '+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+(night?' · 地球夜面':' · 地球日面');
+  var fl=document.getElementById('floaty'),items=['☕','✒️','📓'],fi=0;
+  (function drift(){var dur=24000+Math.random()*8000,s=Date.now();
+    var x0=60+Math.random()*120,y0=110+Math.random()*80;fl.textContent=items[fi++%items.length];
+    (function step(){var p=(Date.now()-s)/dur;if(p>=1){drift();return;}
+      fl.style.left=(x0+p*640)+'px';fl.style.top=(y0+p*300)+'px';
+      fl.style.transform='rotate('+(p*260)+'deg)';fl.style.opacity=(0.5*Math.sin(p*Math.PI)).toFixed(2);
+      requestAnimationFrame(step);})();})();
+})();
+renderPrepCard();
+</script>
+</body>
+</html>
