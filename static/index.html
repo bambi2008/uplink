@@ -272,7 +272,7 @@
       <label>GroupId（选填）</label>
       <input id="groupInput" type="text" placeholder="可留空">
       <label style="margin-top:18px">你的英文名（Jake 打招呼时怎么称呼你）</label>
-      <input id="unName" type="text" placeholder="比如 Jose，留空则叫 buddy">
+      <input id="unName" type="text" placeholder="比如 Jose 或 Mao Qin（会自动首字母大写）">
       <label style="margin-top:18px">识别引擎（Jake 用哪只耳朵听你说）</label>
       <div style="display:flex;gap:14px;margin-top:8px;font-size:13.5px;color:var(--paper);flex-wrap:wrap">
         <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--paper);cursor:pointer"><input type="radio" name="asrEngine" value="xf" checked style="width:auto;margin:0">讯飞</label>
@@ -394,7 +394,7 @@ function hdrs(extra){return Object.assign({'Content-Type':'application/json','X-
 function hudShow(kind,text){ const h=$('hudLine'); if(!h)return;
   h.className='hud-line show'+(kind==='local'?' local':'');
   const tag=kind==='local'?'LOCAL · YOU':'REMOTE · JAKE';
-  h.innerHTML='<span class="tag">'+tag+'</span>'; h.appendChild(document.createTextNode(text)); }
+  h.innerHTML='<span class="tag">'+tag+'</span>'+renderGems(text); }
 function hudHide(){ const h=$('hudLine'); if(h) h.className='hud-line'; }
 
 /* ===== 信号往返光点（Jake 思考时）===== */
@@ -505,7 +505,7 @@ $('keySave').onclick=()=>{
   sSet('mm_key',v); sSet('mm_group',$('groupInput').value.trim());
   sSet('xf_appid',$('xfAppid').value.trim()); sSet('xf_apikey',$('xfApikey').value.trim());
   sSet('db_appid',$('dbAppid').value.trim()); sSet('db_token',$('dbToken').value.trim());
-  sSet('user_name',$('unName').value.trim());
+  sSet('user_name',$('unName').value.trim().replace(/\b[a-z]/g,c=>c.toUpperCase()));
   sSet('xf_ise_key',$('xfIseKey').value.trim()); sSet('xf_ise_secret',$('xfIseSecret').value.trim());
   const eng=document.querySelector('input[name=asrEngine]:checked'); sSet('asr_engine',eng?eng.value:'xf');
   const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
@@ -571,7 +571,7 @@ function sanitizeSpeech(t){
 function enqueueSpeech(text){
   /* Jake 在要求跟读的回合末尾埋 [echo: 目标句]，读出来之前剥掉并记下目标 */
   text=text.replace(/\[\s*echo\s*:\s*([^\]]+)\]/ig,(m,p)=>{pendingEcho=p.trim();return '';});
-  text=sanitizeSpeech(text);
+  text=sanitizeSpeech(text).replace(/\*\*/g,'');   /* 高级用法标记 ** 不进TTS */
   if(!text.trim()) return;
   /* 双重确认保险：垫词已替他说过"OK"，若首句仍是纯反应词就跳过不念 */
   if(replySeg===0 && /^(oh[,!]?\s*)?(ok(ay)?|right( right)?|nice( one)?|perfect|great|awesome|alright|got it|love (that|it)|wow|exactly|totally|sweet|cool)[.!,]?$/i.test(text.trim())) return;
@@ -895,12 +895,17 @@ function cleanForDisplay(t){
           .replace(/\(\s*(laughs?|laughing|chuckles?|chuckling|giggles?|sighs?|sighing|breath|emm|smiles?|grins?|winks?|nods?|pauses?|shrugs?|whispers?|clears throat|coughs?)\s*\)/ig,'')
           .replace(/\s{2,}/g,' ').trim();
 }
+function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function renderGems(t){
+  /* **高级用法** → 粗体+下划线+琥珀高亮（TTS已剥掉星号，这里只管眼睛）*/
+  return esc(t).replace(/\*\*([^*]+)\*\*/g,'<b style="color:var(--amber);text-decoration:underline;text-underline-offset:3px">$1</b>');
+}
 function addLine(role,text){
   transcript.push({role,text});
   const empty=$('logEmpty'); if(empty) empty.remove();
   const d=document.createElement('div'); d.className='msg '+(role==='assistant'?'jake':'me');
-  d.innerHTML='<span class="who">'+(role==='assistant'?'REMOTE · JAKE':'LOCAL · YOU')+'</span>';
-  d.appendChild(document.createTextNode(text));
+  d.innerHTML='<span class="who">'+(role==='assistant'?'REMOTE · JAKE':'LOCAL · YOU')+'</span>'
+             +(role==='assistant'?renderGems(text):esc(text));
   $('log').appendChild(d); $('log').scrollTop=$('log').scrollHeight;
   /* 定稿的句子推到窗下 HUD */
   if(role==='assistant') hudShow('remote',text);   /* 只有Jake的话上字幕，常驻到下一段 */
@@ -951,7 +956,8 @@ You browsed forums this morning over coffee. These are the topics you're genuine
 {{CARDS}}
 
 HOW TO RUN THE CONVERSATION:
-- The learner's English name is {{NAME}} — greet them by name and use it naturally now and then.
+- The learner's English name is {{NAME}} — greet them by name and use it naturally now and then. If it looks like Chinese pinyin (e.g. Mao Qin), say it smoothly as a normal name — never spell it out letter by letter.
+- HIGHLIGHT MARKER: wrap the single most valuable native expression or advanced usage you teach in double asterisks — like **grab lunch** — so it lights up on their screen. The asterisks are silent (stripped before speech). Use it on 1-2 phrases per turn max, only for genuinely advanced/native gems, never on ordinary words.
 - Open with one short warm CHINESE greeting by name ("哎 {{NAME}}，接通啦！"), then within your FIRST or SECOND turn propose today's topic BY NAME and hand them the choice: "我们今天聊聊【today's planned lesson topic — or the OPENER card if there's no plan】怎么样？还是你有别的想聊的？" Their pick always wins; if they choose their own topic, follow it happily.
 - Once the topic is set, actually discuss it: share your take, ask what they think, react to their answer, weave in the language gems and the preview expressions from the plan. Spend real time here — several exchanges, not one question.
 - Only when a topic runs dry, move to the BACKUP, then the WILDCARD, the same way.
@@ -990,7 +996,7 @@ async function startCall(){
     }catch(e){ cards={cards:''}; }
     if(cards.error) throw new Error('简报：'+cards.error);
     const cardText = cards.cards || '(No briefing today — just chat naturally.)';
-    history=[{role:'system',content:PERSONA.replace('{{CARDS}}',cardText).replace('{{LESSON}}',buildLessonMemo()).replaceAll('{{NAME}}',sGet('user_name')||'buddy')}];
+    history=[{role:'system',content:PERSONA.replace('{{CARDS}}',cardText).replace('{{LESSON}}',buildLessonMemo()).replaceAll('{{NAME}}',(sGet('user_name')||'buddy').replace(/\b[a-z]/g,c=>c.toUpperCase()))}];
     transcript=[]; seconds=0; wrapped=false;
 
     /* 第2步：麦克风（如果弹权限窗，请点允许；限时20秒） */
