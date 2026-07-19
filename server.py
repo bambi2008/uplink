@@ -31,9 +31,14 @@ import base64
 import pathlib
 import contextlib
 import uuid
+import sys
 
 import aiohttp
 from aiohttp import web
+
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(Exception):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # 豆包模块在这里就尝试加载一次，加载结果供 /api/diag 和 /api/asr_test 使用
 _DB_OK, _DB_ERR = False, ""
@@ -45,6 +50,7 @@ except Exception as _e:
 
 ROOT = pathlib.Path(__file__).parent
 STATIC = ROOT / "static"
+LOCAL_SETTINGS = ROOT / "local-settings.json"
 
 MINIMAX_BASE = "https://api.minimaxi.com"      # MiniMax 负责"想+说"
 XF_RTASR_HOST = "rtasr.xfyun.cn"               # 讯飞负责"听"（实时语音转写）
@@ -87,6 +93,45 @@ async def index(req):
     # no-store：文件一换、刷新即新，避免浏览器缓存旧页面导致"改了没生效"
     return web.FileResponse(STATIC / "index.html",
                             headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+async def favicon(req):
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<rect width="64" height="64" rx="14" fill="#05070c"/>
+<circle cx="32" cy="32" r="18" fill="none" stroke="#e8a254" stroke-width="5"/>
+<circle cx="32" cy="32" r="5" fill="#7fb585"/>
+<path d="M32 4v12M32 48v12M4 32h12M48 32h12" stroke="#8fa3b0" stroke-width="4" stroke-linecap="round"/>
+</svg>"""
+    return web.Response(text=svg, content_type="image/svg+xml")
+
+
+SAFE_SETTING_KEYS = {
+    "mm_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
+    "db_appid", "db_token", "user_name", "asr_engine", "mm_pace", "mm_tq", "mm_voice",
+}
+
+
+async def api_local_settings(req):
+    if req.method == "GET":
+        if not LOCAL_SETTINGS.exists():
+            return web.json_response({"settings": {}})
+        try:
+            return web.json_response({"settings": json.loads(LOCAL_SETTINGS.read_text(encoding="utf-8"))})
+        except Exception:
+            return web.json_response({"settings": {}, "error": "本地设置文件读取失败"}, status=500)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    incoming = body.get("settings") or {}
+    clean = {}
+    for key in SAFE_SETTING_KEYS:
+        value = incoming.get(key)
+        if isinstance(value, str):
+            clean[key] = value.strip()
+    LOCAL_SETTINGS.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    return web.json_response({"ok": True, "saved": sorted(clean.keys())})
 
 
 # ----------------------------------------------------------------- 对话（流式）
@@ -698,6 +743,7 @@ async def api_asr_test(req):
 def make_app():
     app = web.Application(client_max_size=1024 * 1024 * 8)
     app.router.add_get("/", index)
+    app.router.add_get("/favicon.ico", favicon)
     app.router.add_get("/ws/asr", ws_asr)
     try:
         import doubao
@@ -705,6 +751,8 @@ def make_app():
     except Exception as _e:
         print("豆包模块未加载：", _e)
     app.router.add_get("/api/diag", api_diag)
+    app.router.add_get("/api/local_settings", api_local_settings)
+    app.router.add_post("/api/local_settings", api_local_settings)
     app.router.add_get("/api/asr_test", api_asr_test)
     app.router.add_post("/api/ise", api_ise)
     app.router.add_post("/api/chat", api_chat)

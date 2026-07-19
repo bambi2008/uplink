@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Uplink · 和 Jake 通话</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2305070c'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23e8a254' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%237fb585'/%3E%3Cpath d='M32 4v12M32 48v12M4 32h12M48 32h12' stroke='%238fa3b0' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -59,14 +60,6 @@
   .primaryBtn:active{background:rgba(232,162,84,.35);transform:scale(.97)}
   #btnEnd{display:none;background:transparent;color:var(--danger);border:1px solid rgba(217,112,95,.4);
     border-radius:26px;padding:14px 22px;font-size:13px;letter-spacing:.1em}
-  #btnZh{display:none;background:rgba(127,181,133,.10);color:var(--green);
-    border:2px solid var(--green);border-radius:30px;padding:18px 34px;
-    font-size:16px;font-weight:700;letter-spacing:.14em}
-  #btnZh:hover{background:rgba(127,181,133,.22)}
-  #btnZh:active{transform:scale(.96)}
-  #btnZh.on{color:#0B131B;background:var(--green);border-color:var(--green);
-    box-shadow:0 0 26px rgba(127,181,133,.5);animation:zhPulse 1.2s ease-in-out infinite}
-  @keyframes zhPulse{0%,100%{box-shadow:0 0 14px rgba(127,181,133,.35)}50%{box-shadow:0 0 30px rgba(127,181,133,.65)}}
   .hint{font-size:11.5px;color:#5C6B78;margin-top:12px;max-width:360px;line-height:1.7}
   .links{display:flex;gap:6px;margin-top:14px}
   .linkish{background:none;border:none;color:#5C6B78;font-size:11px;letter-spacing:.1em;
@@ -237,6 +230,7 @@
     </div>
 
     <div class="conn" id="conn"></div>
+    <div class="conn" id="earDiag"></div>
     <div class="timer" id="timer">通讯窗口 <b id="clock">00:00</b> / 30:00</div>
 
     <div id="prepCard" style="display:none;margin:14px auto 2px;max-width:420px;padding:13px 16px;border-radius:14px;background:rgba(232,162,84,.09);border:1px solid rgba(232,162,84,.35);cursor:pointer;text-align:left">
@@ -247,7 +241,6 @@
 
     <div class="controls">
       <button id="btnStart" class="primaryBtn">◉ 建立通讯 · UPLINK</button>
-      <button id="btnZh" onclick="speakChinese()" title="下一句用中文说，说完自动切回英文">🇨🇳 说中文</button>
       <button id="btnEnd">切断 CLOSE</button>
     </div>
     <div class="hint" id="hint"></div>
@@ -352,14 +345,56 @@ const SESSION_MIN=30, WRAP_MIN=26;
 let mem={};
 function sGet(k){try{return localStorage.getItem(k)||''}catch{return mem[k]||''}}
 function sSet(k,v){mem[k]=v;try{localStorage.setItem(k,v)}catch{}}
+function cleanToken(v){return String(v||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim()}
+function latinHeaderOk(v){return /^[\x20-\x7E]*$/.test(v||'')}
+function tokenProblem(label,v){
+  if(!v) return label+'为空';
+  if(!latinHeaderOk(v)) return label+'里有中文、全角字符或隐藏字符，请只粘贴平台给你的 Key/Token 本体';
+  if(/\s/.test(v)) return label+'里有空格或换行，请重新粘贴';
+  return '';
+}
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
+const SETTING_KEYS=['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
+function collectSettings(){
+  const out={};
+  SETTING_KEYS.forEach(k=>{ out[k]=sGet(k); });
+  return out;
+}
+async function saveLocalSettings(){
+  try{
+    await fetchLocal('/api/local_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings:collectSettings()})},'本地设置备份接口');
+  }catch(e){ console.warn('本地设置备份失败:',e); }
+}
+async function restoreLocalSettings(){
+  try{
+    const r=await fetchLocal('/api/local_settings',null,'本地设置恢复接口');
+    if(!r.ok) return;
+    const j=await r.json(), settings=j.settings||{};
+    let restored=0;
+    SETTING_KEYS.forEach(k=>{
+      if(!sGet(k) && settings[k]){ sSet(k,settings[k]); restored++; }
+    });
+    if(restored) setStatus('已从本机私有设置恢复通讯密钥。');
+  }catch(e){}
+}
+function localServerHint(){
+  const here=location.origin&&location.origin!=='null'?location.origin:'file://';
+  return '当前页面地址：'+here+'。请固定用 http://127.0.0.1:8800/ 打开；如果之前用 localhost 填过密钥，浏览器会把它当成另一个站点，需要重新填一次。';
+}
+async function fetchLocal(path, opts, label){
+  try{
+    return await fetch(path, opts||{});
+  }catch(e){
+    throw new Error((label||'本地服务器')+'连接失败：'+e.message+'。'+localServerHint());
+  }
+}
 
 /* 「测试连接」：让服务器亲自去连识别后端，把原始结果端上来 */
 async function asrTest(){
   const out=$('asrTestOut'); out.style.color='var(--fog)'; out.textContent='测试中…';
   const eng=(document.querySelector('input[name=asrEngine]:checked')||{}).value||'xf';
   try{
-    const dg=await fetch('/api/diag');
+    const dg=await fetchLocal('/api/diag', null, '诊断接口');
     if(!dg.ok){ out.style.color='var(--amber)';
       out.textContent='❌ 服务器还是旧版本（没有诊断接口）。\n请：1) 彻底关掉黑色命令行窗口  2) 确认用的是最新解压的文件夹  3) 重新双击启动脚本  4) 回到本页按 Ctrl+F5 强刷新'; return; }
     const dj=await dg.json();
@@ -368,7 +403,7 @@ async function asrTest(){
     let q;
     if(eng==='db') q='engine=db&appid='+encodeURIComponent($('dbAppid').value.trim())+'&token='+encodeURIComponent($('dbToken').value.trim());
     else q='engine=xf&appid='+encodeURIComponent($('xfAppid').value.trim())+'&apikey='+encodeURIComponent($('xfApikey').value.trim());
-    const r=await fetch('/api/asr_test?'+q); const j=await r.json();
+    const r=await fetchLocal('/api/asr_test?'+q, null, '识别测试接口'); const j=await r.json();
     out.style.color=j.ok?'var(--green)':'var(--amber)';
     out.textContent=(j.ok?'✅ ':'❌ ')+j.detail+'\n（server build '+dj.build+'，豆包模块'+(dj.doubao_loaded?'已加载':'未加载')+'）';
   }catch(e){ out.style.color='var(--amber)'; out.textContent='❌ 联系不上本地服务器：'+e+'\n黑色命令行窗口是不是关了？重新双击启动脚本。'; }
@@ -388,7 +423,20 @@ function setHalo(s){
   else if(s==='speaking'){ pingStop(); }
   else { pingStop(); hudHide(); }
 }
-function hdrs(extra){return Object.assign({'Content-Type':'application/json','X-MM-Key':sGet('mm_key'),'X-MM-Group':sGet('mm_group')},extra||{})}
+function validateKeysForCall(){
+  const mm=cleanToken(sGet('mm_key')), group=cleanToken(sGet('mm_group'));
+  const problems=[tokenProblem('MiniMax API Key',mm)];
+  if(group) problems.push(tokenProblem('MiniMax GroupId',group));
+  const bad=problems.filter(Boolean);
+  if(bad.length) throw new Error(bad.join('；')+'。请点「通讯设置」重新粘贴。');
+}
+function hdrs(extra){
+  const h={'Content-Type':'application/json'}, mm=cleanToken(sGet('mm_key')), group=cleanToken(sGet('mm_group'));
+  if(!latinHeaderOk(mm)||!latinHeaderOk(group)) throw new Error('MiniMax API Key / GroupId 含有非英文字符，请点「通讯设置」重新粘贴。');
+  h['X-MM-Key']=mm;
+  if(group) h['X-MM-Group']=group;
+  return Object.assign(h,extra||{});
+}
 
 /* ===== 窗下 HUD 当前句 ===== */
 function hudShow(kind,text){ const h=$('hudLine'); if(!h)return;
@@ -463,12 +511,13 @@ function playWrapPing(){ try{ beep(520,0,0.3,0.05); beep(400,0.32,0.4,0.05); }ca
 let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     active=false, phase='idle', curEmotion='',
     audioQueue=[], playing=false, curAudio=null, genDone=true, interrupted=false,
-    asrWS=null, audioCtx=null, micNode=null, micStream=null,
+    asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
 /* ---------- 设置弹窗 ---------- */
-$('btnKey').onclick=()=>{
+$('btnKey').onclick=async ()=>{
+  await restoreLocalSettings();
   $('keyInput').value=sGet('mm_key'); $('groupInput').value=sGet('mm_group');
   $('xfAppid').value=sGet('xf_appid'); $('xfApikey').value=sGet('xf_apikey');
   $('dbAppid').value=sGet('db_appid'); $('dbToken').value=sGet('db_token');
@@ -501,17 +550,21 @@ function renderVoices(){
   };
 }
 $('keySave').onclick=()=>{
-  const v=$('keyInput').value.trim(); if(!v){alert('请粘贴 MiniMax API Key');return;}
-  sSet('mm_key',v); sSet('mm_group',$('groupInput').value.trim());
-  sSet('xf_appid',$('xfAppid').value.trim()); sSet('xf_apikey',$('xfApikey').value.trim());
-  sSet('db_appid',$('dbAppid').value.trim()); sSet('db_token',$('dbToken').value.trim());
+  const v=cleanToken($('keyInput').value); if(!v){alert('请粘贴 MiniMax API Key');return;}
+  const g=cleanToken($('groupInput').value);
+  const bad=[tokenProblem('MiniMax API Key',v), g?tokenProblem('MiniMax GroupId',g):''].filter(Boolean);
+  if(bad.length){ alert(bad.join('\n')); return; }
+  sSet('mm_key',v); sSet('mm_group',g);
+  sSet('xf_appid',cleanToken($('xfAppid').value)); sSet('xf_apikey',cleanToken($('xfApikey').value));
+  sSet('db_appid',cleanToken($('dbAppid').value)); sSet('db_token',cleanToken($('dbToken').value));
   sSet('user_name',$('unName').value.trim().replace(/\b[a-z]/g,c=>c.toUpperCase()));
   sSet('xf_ise_key',$('xfIseKey').value.trim()); sSet('xf_ise_secret',$('xfIseSecret').value.trim());
   const eng=document.querySelector('input[name=asrEngine]:checked'); sSet('asr_engine',eng?eng.value:'xf');
   const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
   const tq=document.querySelector('input[name=tqMode]:checked'); sSet('mm_tq',tq?tq.value:'hd');
   const voice=document.querySelector('input[name=voicePick]:checked'); if(voice)sSet('mm_voice',voice.value);
-  $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 可以打电话了。');
+  saveLocalSettings();
+  $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 已同步到本机私有设置，可以打电话了。');
 };
 
 /* ---------- 后端 API ---------- */
@@ -524,14 +577,14 @@ async function tts(text, vid, emotion, modelOverride){
   let boost='auto';
   if(cjk===0) boost='English';
   else if(cjk>latin) boost='Chinese';
-  const r=await fetch('/api/tts',{method:'POST',headers:hdrs(),
+  const r=await fetchLocal('/api/tts',{method:'POST',headers:hdrs(),
     body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
-      model, language_boost: boost})});
+      model, language_boost: boost})}, '语音合成接口');
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
   return await r.blob();
 }
 async function chatStream(messages, onSentence){
-  const r=await fetch('/api/chat',{method:'POST',headers:hdrs(),body:JSON.stringify({messages})});
+  const r=await fetchLocal('/api/chat',{method:'POST',headers:hdrs(),body:JSON.stringify({messages})}, 'MiniMax 对话接口');
   if(!r.ok) throw new Error('对话失败 '+r.status);
   const reader=r.body.getReader(), dec=new TextDecoder();
   let full='',pending='',emoDone=false,emoBuf='',firstOut=false;
@@ -605,6 +658,7 @@ function playFiller(){
 let gapFills=0;
 async function pumpQueue(){
   if(playing)return; playing=true; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（点头像可打断）'); phase='speaking';
+  earDiag('Jake 正在说 · 现在不会收音；要插话请点头像打断');
   while(audioQueue.length&&!interrupted){
     const blob=await audioQueue.shift(); if(!blob||interrupted)continue;
     await playBlob(blob);
@@ -650,27 +704,36 @@ $('haloWrap').onclick=()=>{
 
 /* ---------- 麦克风 → 后端 WebSocket 识别 ---------- */
 let micPipeOk=false;   // WebAudio采集管线是否可用（不可用则必须走备用识别）
+let micWatch=null, micLastVoice=0, asrLastText=0, micLevel=0, micFrames=0, listenStartedAt=0, asrRestarting=false;
+function earDiag(t){ const e=$('earDiag'); if(e)e.innerHTML=t||''; }
 async function openMic(){
   micPipeOk=false;
   try{
-    micStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+    micStream=await navigator.mediaDevices.getUserMedia({audio:{
+      channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
+    }});
   }catch(e){ /* 没给权限，备用识别会自己再申请 */ }
   try{
     audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
-    const src=audioCtx.createMediaStreamSource(micStream);
+    await audioCtx.resume();
+    micSource=audioCtx.createMediaStreamSource(micStream);
     micNode=audioCtx.createScriptProcessor(4096,1,1);
-    src.connect(micNode); micNode.connect(audioCtx.destination);
+    micSink=audioCtx.createGain(); micSink.gain.value=0;
+    micSource.connect(micNode); micNode.connect(micSink); micSink.connect(audioCtx.destination);
     micNode.onaudioprocess=e=>{
       if(phase!=='listening') return;
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
-      for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));i16[i]=s<0?s*32768:s*32767;}
+      let sum=0;
+      for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));sum+=s*s;i16[i]=s<0?s*32768:s*32767;}
+      micLevel=Math.sqrt(sum/f32.length); micFrames++;
+      if(micLevel>0.006) micLastVoice=Date.now();
       /* 跟读评测旁路：Jake 要求跟读时，这轮音频留一份（上限30秒），说完送去发音评测 */
       if(pendingEcho&&echoChunks.reduce((n,c)=>n+c.length,0)<16000*30) echoChunks.push(i16);
       if(asrWS&&asrWS.readyState===1) asrWS.send(i16.buffer);
     };
-    micPipeOk=true;
-  }catch(e){ audioCtx=null; micNode=null; micPipeOk=false; }
+    micPipeOk=true; earDiag('麦克风 · 已授权，等待你说话');
+  }catch(e){ audioCtx=null; micNode=null; micPipeOk=false; earDiag('麦克风 · 未建立音频管线，准备使用浏览器备用识别'); }
 }
 let asrOk=false, asrTries=0, usingFallback=false;
 let pendingEcho=null, echoChunks=[], engQ=null;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
@@ -679,6 +742,7 @@ function failEngine(reason){
   const dead=engQ&&engQ.shift();
   console.warn('识别引擎失效:',dead,reason);
   asrOk=false; asrTries=0;
+  earDiag('识别 · '+reason);
   if(engQ&&engQ.length){
     $('conn').innerHTML='识别 · 切换备用引擎（'+(engQ[0]==='db'?'豆包':'讯飞')+'）…';
     setTimeout(connectASR,300);
@@ -709,9 +773,12 @@ function connectASR(){
     let d; try{d=JSON.parse(ev.data)}catch{return;}
     if(d.type==='ready'){ asrOk=true; asrTries=0;
       const pref=sGet('asr_engine')||'xf';
-      $('conn').innerHTML='识别连接 <b>已就绪</b>（'+(engine==='db'?'豆包':'讯飞')+(engine!==pref?' · 热备援':'')+'）'; return; }
+      $('conn').innerHTML='识别连接 <b>已就绪</b>（'+(engine==='db'?'豆包':'讯飞')+(engine!==pref?' · 热备援':'')+'）';
+      earDiag(phase==='listening'?'现在轮到你说 · 中文英文都可以':'耳朵 · 已接通，等 Jake 说完才开始听你'); return; }
     if(d.type==='error'){ failEngine((engine==='db'?'豆包':'讯飞')+'后端报错：'+(d.msg||'未知')); return; }
     if(d.type==='asr' && phase==='listening'){
+      asrLastText=Date.now();
+      earDiag('耳朵 · 已识别到文字');
       if(d.final){ finals+=d.text+' '; showPartial(''); armSilence(Math.min(350,paceMs())); }
       else { showPartial(d.text); armSilence(); }
     }
@@ -728,10 +795,42 @@ function connectASR(){
   asrWS.onerror=()=>{};
 }
 
-/* 安全网：后端识别不可用时，退回浏览器自带识别。
-   浏览器同一时刻只允许一个识别实例，因此采用：单引擎英文为主 +
-   「中文」按钮让下一句用中文听、说完自动弹回英文。 */
-let fbRec=null, fbActive=false, fbLang='en-US', fbWatch=null;
+function restartASR(reason){
+  if(!active||usingFallback||asrRestarting) return;
+  asrRestarting=true;
+  $('conn').innerHTML='识别连接 · 正在刷新耳朵…';
+  setStatus('我听到麦克风有声音，但识别没出字，正在自动重连。你可以马上再说一遍。');
+  try{ if(asrWS){ asrWS.onclose=null; asrWS.close(); asrWS=null; } }catch{}
+  setTimeout(()=>{ asrRestarting=false; if(active&&!usingFallback) connectASR(); },350);
+}
+
+function startMicWatch(){
+  clearInterval(micWatch);
+  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); asrRestarting=false;
+  earDiag('现在轮到你说 · 中文英文都可以');
+  micWatch=setInterval(()=>{
+    if(!active||phase!=='listening'||usingFallback) return;
+    if(audioCtx&&audioCtx.state==='suspended') audioCtx.resume().catch(()=>{});
+    const now=Date.now(), heardAgo=micLastVoice?now-micLastVoice:Infinity;
+    const textAgo=asrLastText?now-asrLastText:Infinity;
+    if(micFrames===0 && now-listenStartedAt>3000){
+      startFallbackASR('麦克风授权了，但 WebAudio 没有收到音频帧（当前浏览器可能拦截了麦克风采集）');
+      return;
+    }
+    if(!micLastVoice && micFrames>20 && micLevel<0.006){
+      earDiag('麦克风 · 暂时没检测到声音');
+      setStatus('到你了 · 但暂时没有检测到麦克风声音，请确认浏览器麦克风权限/输入设备。');
+      return;
+    }
+    if(micLastVoice && heardAgo<1600) earDiag('麦克风 · 听到声音，等待识别文字…');
+    if(heardAgo<1200 && textAgo>4200 && asrOk){
+      restartASR('mic-active-no-text');
+    }
+  },1000);
+}
+
+/* 安全网：后端识别不可用时，退回浏览器自带识别。 */
+let fbRec=null, fbActive=false, fbLang='zh-CN', fbWatch=null;
 
 function startFallbackASR(reason){
   if(usingFallback) return;
@@ -745,7 +844,7 @@ function startFallbackASR(reason){
   $('conn').innerHTML='识别 · <b style="color:var(--amber)">浏览器备用模式</b>'
     +(reason?'<div style="font-size:10.5px;color:var(--amber);opacity:.85;line-height:1.5;max-width:340px;margin-top:2px">原因：'+reason+'</div>':'');
   if(reason) $('conn').title=reason;
-  $('btnZh').style.display='inline-block';
+  earDiag('耳朵 · 浏览器备用识别中，中文英文都可以直接说');
   if(!('webkitSpeechRecognition' in window||'SpeechRecognition' in window)){
     setStatus('这个浏览器不支持备用识别，请改用 Edge/Chrome。'); return;
   }
@@ -764,6 +863,7 @@ function fbStart(){
   fbRec=new SR(); fbRec.lang=fbLang; fbRec.continuous=true; fbRec.interimResults=true;
   fbRec.onresult=e=>{
     if(phase!=='listening') return;
+    asrLastText=Date.now(); earDiag('耳朵 · 浏览器识别到文字');
     let interim='';
     for(let i=e.resultIndex;i<e.results.length;i++){
       if(e.results[i].isFinal){ finals+=e.results[i][0].transcript+' '; }
@@ -784,18 +884,6 @@ function fbStop(){
   if(fbRec){ try{fbRec.onend=null; fbRec.abort();}catch{} fbRec=null; }
 }
 
-/* 一键中文：下一句用中文听，说完自动弹回英文 */
-function speakChinese(){
-  if(!usingFallback||!active) return;
-  fbLang='zh-CN';
-  $('btnZh').classList.add('on'); $('btnZh').textContent='🎙 中文听写中…';
-  setStatus('好，这句说中文 · 停半秒再开口更稳，说完自动切回英文');
-  if(phase==='listening'){ fbStop(); finals=''; lastPartial=''; setTimeout(fbStart,400); }
-}
-function fbRevertLang(){
-  if(fbLang!=='en-US'){ fbLang='en-US';
-    $('btnZh').classList.remove('on'); $('btnZh').textContent='🇨🇳 说中文'; }
-}
 let lastPartial='';   // 屏幕上最新显示的完整识别文字（含未定稿的临时结果）
 function showPartial(t){
   if(!t){ if(partialEl){partialEl.remove();partialEl=null;} lastPartial=''; return; }
@@ -816,7 +904,7 @@ async function finishTurn(){
   const text=(b.length>a.length ? b : a);
   finals=''; lastPartial='';
   showPartial('');
-  if(usingFallback){ fbStop(); fbRevertLang(); }
+  if(usingFallback){ fbStop(); }
   if(!text){ pendingEcho=null; echoChunks=[]; return; }
   /* 跟读评测：Jake 埋了目标句且这轮录到了足够音频（≥0.4秒），先打分再交给 Jake */
   const phrase=pendingEcho; pendingEcho=null;
@@ -843,9 +931,9 @@ function pcmToB64(chunks){
 async function iseEvaluate(phrase,chunks){
   try{
     const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
-    const r=await fetch('/api/ise',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
+    const r=await fetchLocal('/api/ise',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
       body:JSON.stringify({appid:sGet('xf_appid'),apikey:sGet('xf_ise_key'),apisecret:sGet('xf_ise_secret'),
-                           text:phrase,pcm:pcmToB64(chunks)})});
+                           text:phrase,pcm:pcmToB64(chunks)})}, '发音评测接口');
     clearTimeout(t);
     const j=await r.json();
     if(!j.ok){ console.warn('评测失败:',j.detail); addScore('📊 发音评测没成功：'+(j.detail||'未知原因')); return null; }
@@ -873,6 +961,7 @@ function addScore(text){
 }
 function startListening(){ if(!active)return; interrupted=false; finals=''; lastPartial=''; echoChunks=[]; clearTimeout(silenceTimer);
   phase='listening'; setHalo('listening');
+  startMicWatch();
   if(usingFallback) fbStart();   // 备用模式：轮到你了才开耳朵
   setStatus('到你了 · 英语中文随便说，停顿约 '+(paceMs()/1000).toFixed(1).replace('.0','')+' 秒就轮到他'); }
 
@@ -983,15 +1072,17 @@ function withTimeout(promise,ms,name){
 async function startCall(){
   if(active||$('btnStart').disabled) return;   // 防重复触发
   if(!sGet('mm_key')){ $('keyOverlay').style.display='flex'; return; }
+  try{ validateKeysForCall(); }catch(e){ setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
   $('btnStart').textContent='◉ 通讯建立中…';   // 按下瞬间立刻给反馈
   step(1,'接收地面简报 UPLINK…（最多15秒）');
   setTimeout(()=>{ try{ playEntranceSound(); }catch(e){} },50);  // 音效延后，绝不拖慢首屏反馈
   try{
+    await withTimeout(fetchLocal('/api/diag', null, '本地诊断接口'),5000,'本地诊断接口');
     let cards;
     try{
       const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),15000);
-      try{ cards=await fetch('/api/briefing',{method:'POST',headers:hdrs(),body:'{}',signal:ctrl.signal}).then(r=>r.json()); }
+      try{ cards=await fetchLocal('/api/briefing',{method:'POST',headers:hdrs(),body:'{}',signal:ctrl.signal}, '每日简报接口').then(r=>r.json()); }
       finally{ clearTimeout(to); }
     }catch(e){ cards={cards:''}; }
     if(cards.error) throw new Error('简报：'+cards.error);
@@ -1005,9 +1096,8 @@ async function startCall(){
 
     /* 第3步：识别通道 */
     step(3,'连接识别通道…');
-    connectASR(); prepFillers();
-
     active=true;
+    connectASR(); prepFillers();
     $('btnStart').style.display='none'; $('btnEnd').style.display='inline-block';
     $('timer').style.display='block';
     $('hint').innerHTML='全程不用碰电脑：他说完自动轮到你，你说完停顿片刻轮到他。他说太长？点头像打断。';
@@ -1038,14 +1128,15 @@ function startTimer(){
 }
 function cleanup(){
   try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
+  try{if(micSource)micSource.disconnect()}catch{}
+  try{if(micSink)micSink.disconnect()}catch{}
   try{if(audioCtx)audioCtx.close()}catch{}
   try{if(micStream)micStream.getTracks().forEach(t=>t.stop())}catch{}
   try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{}
   try{if(fbRec){fbRec.onend=null;fbRec.abort();}}catch{}
-  clearInterval(fbWatch); fbWatch=null;
-  micNode=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
-  fbLang='en-US'; asrOk=false; asrTries=0;
-  try{$('btnZh').style.display='none';$('btnZh').classList.remove('on');}catch(e){}
+  clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null;
+  micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
+  fbLang='zh-CN'; asrOk=false; asrTries=0; earDiag('');
 }
 async function endCall(showReport){
   if(!active)return;
@@ -1063,7 +1154,7 @@ async function endCall(showReport){
     $('reportDate').textContent=dateStr+' · 本次轨道通话 '+mins+' 分钟';
     try{
       const convo=transcript.map(t=>(t.role==='assistant'?'Jake':'学员')+': '+t.text).join('\n');
-      const rep=await fetch('/api/report',{method:'POST',headers:hdrs(),body:JSON.stringify({transcript:convo})}).then(r=>r.json());
+      const rep=await fetchLocal('/api/report',{method:'POST',headers:hdrs(),body:JSON.stringify({transcript:convo})}, '课后复盘接口').then(r=>r.json());
       $('reportBody').innerHTML=mdToHtml(rep.report||rep.error||'生成失败');
       currentReport={date:dateStr,minutes:mins,report:rep.report||'',transcript:convo.slice(-12000)};
       nbAdd(currentReport);
@@ -1179,6 +1270,7 @@ function mdToHtml(md){return md.replace(/&/g,'&amp;').replace(/</g,'&lt;')
       fl.style.transform='rotate('+(p*260)+'deg)';fl.style.opacity=(0.5*Math.sin(p*Math.PI)).toFixed(2);
       requestAnimationFrame(step);})();})();
 })();
+restoreLocalSettings();
 renderPrepCard();
 </script>
 </body>
