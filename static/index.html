@@ -355,6 +355,17 @@ function tokenProblem(label,v){
 }
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
+const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
+function settingUsable(k,v){
+  const value=cleanToken(v);
+  if(!value) return false;
+  if(TOKEN_SETTING_KEYS.has(k)) return latinHeaderOk(value)&&!/[\s\u3400-\u9fff]/.test(value)&&!/Failed to fetch|通讯建立失败|连接失败|把这行字发给开发者/.test(value);
+  if(k==='asr_engine') return value==='xf'||value==='db';
+  if(k==='mm_pace') return ['fast','normal','calm'].includes(value);
+  if(k==='mm_tq') return value==='hd'||value==='turbo';
+  if(k==='mm_voice') return VOICES.some(v=>v[0]===value);
+  return true;
+}
 function collectSettings(){
   const out={};
   SETTING_KEYS.forEach(k=>{ out[k]=sGet(k); });
@@ -372,7 +383,7 @@ async function restoreLocalSettings(){
     const j=await r.json(), settings=j.settings||{};
     let restored=0;
     SETTING_KEYS.forEach(k=>{
-      if(!sGet(k) && settings[k]){ sSet(k,settings[k]); restored++; }
+      if(settingUsable(k,settings[k]) && !settingUsable(k,sGet(k))){ sSet(k,cleanToken(settings[k])); restored++; }
     });
     if(restored) setStatus('已从本机私有设置恢复通讯密钥。');
   }catch(e){}
@@ -704,7 +715,7 @@ $('haloWrap').onclick=()=>{
 
 /* ---------- 麦克风 → 后端 WebSocket 识别 ---------- */
 let micPipeOk=false;   // WebAudio采集管线是否可用（不可用则必须走备用识别）
-let micWatch=null, micLastVoice=0, asrLastText=0, micLevel=0, micFrames=0, listenStartedAt=0, asrRestarting=false;
+let micWatch=null, micSilenceTimer=null, micLastVoice=0, asrLastText=0, micLevel=0, micFrames=0, listenStartedAt=0, noTextPromptAt=0, turnClosing=false, asrRestarting=false, micNoiseFloor=0.003, micSpeechStarted=false;
 function earDiag(t){ const e=$('earDiag'); if(e)e.innerHTML=t||''; }
 async function openMic(){
   micPipeOk=false;
@@ -721,13 +732,21 @@ async function openMic(){
     micSink=audioCtx.createGain(); micSink.gain.value=0;
     micSource.connect(micNode); micNode.connect(micSink); micSink.connect(audioCtx.destination);
     micNode.onaudioprocess=e=>{
-      if(phase!=='listening') return;
+      if(phase!=='listening'||turnClosing) return;
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
       let sum=0;
       for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));sum+=s*s;i16[i]=s<0?s*32768:s*32767;}
       micLevel=Math.sqrt(sum/f32.length); micFrames++;
-      if(micLevel>0.006) micLastVoice=Date.now();
+      if(!micSpeechStarted&&Date.now()-listenStartedAt<800&&micLevel<0.02){
+        micNoiseFloor=micNoiseFloor*.8+micLevel*.2;
+      }
+      const voiceThreshold=Math.max(0.01,micNoiseFloor*3);
+      if(micLevel>voiceThreshold){
+        micLastVoice=Date.now();
+        micSpeechStarted=true;
+        armMicSilence();
+      }
       /* 跟读评测旁路：Jake 要求跟读时，这轮音频留一份（上限30秒），说完送去发音评测 */
       if(pendingEcho&&echoChunks.reduce((n,c)=>n+c.length,0)<16000*30) echoChunks.push(i16);
       if(asrWS&&asrWS.readyState===1) asrWS.send(i16.buffer);
@@ -775,6 +794,7 @@ function connectASR(){
       const pref=sGet('asr_engine')||'xf';
       $('conn').innerHTML='识别连接 <b>已就绪</b>（'+(engine==='db'?'豆包':'讯飞')+(engine!==pref?' · 热备援':'')+'）';
       earDiag(phase==='listening'?'现在轮到你说 · 中文英文都可以':'耳朵 · 已接通，等 Jake 说完才开始听你'); return; }
+    if(d.type==='debug'){ earDiag('诊断 · '+d.msg); return; }
     if(d.type==='error'){ failEngine((engine==='db'?'豆包':'讯飞')+'后端报错：'+(d.msg||'未知')); return; }
     if(d.type==='asr' && phase==='listening'){
       asrLastText=Date.now();
@@ -784,7 +804,7 @@ function connectASR(){
     }
   };
   asrWS.onclose=()=>{
-    if(!active||usingFallback) return;
+    if(!active||usingFallback||turnClosing) return;
     asrTries++;
     if(asrOk && asrTries<4){ $('conn').innerHTML='识别连接 · 重连中…'; setTimeout(connectASR,800); }
     else if(!asrOk){
@@ -796,7 +816,7 @@ function connectASR(){
 }
 
 function restartASR(reason){
-  if(!active||usingFallback||asrRestarting) return;
+  if(!active||usingFallback||asrRestarting||turnClosing) return;
   asrRestarting=true;
   $('conn').innerHTML='识别连接 · 正在刷新耳朵…';
   setStatus('我听到麦克风有声音，但识别没出字，正在自动重连。你可以马上再说一遍。');
@@ -804,12 +824,26 @@ function restartASR(reason){
   setTimeout(()=>{ asrRestarting=false; if(active&&!usingFallback) connectASR(); },350);
 }
 
+function armMicSilence(){
+  clearTimeout(micSilenceTimer);
+  micSilenceTimer=setTimeout(closeAudioTurn, Math.max(900, paceMs()));
+}
+
+function closeAudioTurn(){
+  if(turnClosing||phase!=='listening') return;
+  turnClosing=true;
+  earDiag('麦克风 · 已听到停顿，正在结算这一句…');
+  if(usingFallback) fbStop();
+  try{ if(asrWS&&asrWS.readyState===1) asrWS.send('stop'); }catch{}
+  setTimeout(()=>finishTurn(true),2200);
+}
+
 function startMicWatch(){
-  clearInterval(micWatch);
-  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); asrRestarting=false;
+  clearInterval(micWatch); clearTimeout(micSilenceTimer);
+  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); noTextPromptAt=0; turnClosing=false; asrRestarting=false; micNoiseFloor=0.003; micSpeechStarted=false;
   earDiag('现在轮到你说 · 中文英文都可以');
   micWatch=setInterval(()=>{
-    if(!active||phase!=='listening'||usingFallback) return;
+    if(!active||phase!=='listening'||usingFallback||turnClosing) return;
     if(audioCtx&&audioCtx.state==='suspended') audioCtx.resume().catch(()=>{});
     const now=Date.now(), heardAgo=micLastVoice?now-micLastVoice:Infinity;
     const textAgo=asrLastText?now-asrLastText:Infinity;
@@ -825,6 +859,10 @@ function startMicWatch(){
     if(micLastVoice && heardAgo<1600) earDiag('麦克风 · 听到声音，等待识别文字…');
     if(heardAgo<1200 && textAgo>4200 && asrOk){
       restartASR('mic-active-no-text');
+    }
+    if(micLastVoice && textAgo>6500 && now-noTextPromptAt>6500 && !lastPartial.trim() && !finals.trim()){
+      noTextPromptAt=now;
+      listenAgain('麦克风有声音，但识别还没出文字。我刷新了一下耳朵，请再说一遍。');
     }
   },1000);
 }
@@ -894,9 +932,18 @@ function showPartial(t){
   partialEl.textContent=''; partialEl.innerHTML='<span class="who">LOCAL · YOU</span>'; partialEl.appendChild(document.createTextNode(t));
   $('log').scrollTop=$('log').scrollHeight;
 }
-function armSilence(ms){ clearTimeout(silenceTimer); silenceTimer=setTimeout(finishTurn,ms||paceMs()); }
-async function finishTurn(){
-  if(phase!=='listening')return;
+function armSilence(ms){
+  clearTimeout(silenceTimer);
+  silenceTimer=setTimeout(()=>{ if(phase==='listening') closeAudioTurn(); },Math.max(900,ms||paceMs()));
+}
+function listenAgain(msg){
+  clearTimeout(micSilenceTimer); turnClosing=false;
+  pendingEcho=null; echoChunks=[]; finals=''; lastPartial=''; showPartial('');
+  if(active){ setStatus(msg||'这句没听清，再说一遍就行。'); startListening(); }
+}
+async function finishTurn(force=false){
+  if(phase!=='listening'||(turnClosing&&!force))return;
+  clearTimeout(micSilenceTimer); turnClosing=false;
   /* 关键：说完这轮，取"屏幕上实际显示的完整文字"。
      浏览器识别中文常只给临时结果、迟迟不定稿，若只读 finals 会拿到空串 → Jake 收不到你的话。
      finals 是已定稿部分，lastPartial 是含临时结果的完整显示；谁更全用谁。 */
@@ -905,7 +952,13 @@ async function finishTurn(){
   finals=''; lastPartial='';
   showPartial('');
   if(usingFallback){ fbStop(); }
-  if(!text){ pendingEcho=null; echoChunks=[]; return; }
+  if(!text){
+    const hint = micLastVoice
+      ? '我听到你说话了，但识别没有出文字。请稍微靠近麦克风，再说一遍。'
+      : '这句没有检测到有效声音。请确认浏览器麦克风权限，然后再说一遍。';
+    listenAgain(hint);
+    return;
+  }
   /* 跟读评测：Jake 埋了目标句且这轮录到了足够音频（≥0.4秒），先打分再交给 Jake */
   const phrase=pendingEcho; pendingEcho=null;
   const chunks=echoChunks; echoChunks=[];
@@ -1114,7 +1167,9 @@ async function startCall(){
     pumpQueue();
   }catch(err){
     setStatus('⚠️ 通讯建立失败：'+err.message+'<br><span style="font-size:11px;opacity:.8">把这行字发给开发者即可定位</span>');
-    $('btnStart').disabled=false; $('btnStart').textContent='◉ 建立通讯 · UPLINK'; active=false; cleanup(); renderPrepCard();
+    active=false; phase='idle'; genDone=true; cleanup(); setHalo('');
+    $('btnEnd').style.display='none'; $('btnStart').style.display='inline-block';
+    $('btnStart').disabled=false; $('btnStart').textContent='◉ 重新建立通讯'; renderPrepCard();
   }
 }
 function startTimer(){
@@ -1134,7 +1189,8 @@ function cleanup(){
   try{if(micStream)micStream.getTracks().forEach(t=>t.stop())}catch{}
   try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{}
   try{if(fbRec){fbRec.onend=null;fbRec.abort();}}catch{}
-  clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null;
+  clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer);
+  turnClosing=false;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
   fbLang='zh-CN'; asrOk=false; asrTries=0; earDiag('');
 }

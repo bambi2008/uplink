@@ -5,4 +5,5 @@ Thumbs.db
 local-settings.json
 server-*.log
 claude-export/
+briefings/
 .playwright-cli/

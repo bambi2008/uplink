@@ -18,7 +18,7 @@ Jake 稳定版 · 本地后端
 启动：
   pip install -r requirements.txt
   设置环境变量 MINIMAX_API_KEY（和可选 MINIMAX_GROUP_ID），或运行时在网页里填
-  python server.py   →  打开 http://localhost:8800
+  python server.py   →  打开 http://127.0.0.1:8800/
 """
 
 import os
@@ -109,26 +109,59 @@ SAFE_SETTING_KEYS = {
     "mm_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token", "user_name", "asr_engine", "mm_pace", "mm_tq", "mm_voice",
 }
+TOKEN_SETTING_KEYS = {
+    "mm_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
+    "db_appid", "db_token",
+}
+
+
+def _setting_usable(key, value):
+    """Reject pasted diagnostics and malformed tokens before they can replace a valid backup."""
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if not value:
+        return False
+    if key in TOKEN_SETTING_KEYS:
+        if any(ord(ch) >= 128 for ch in value) or any(ch.isspace() for ch in value):
+            return False
+        if any(marker in value for marker in ("Failed to fetch", "通讯建立失败", "连接失败", "把这行字发给开发者")):
+            return False
+    if key == "asr_engine" and value not in {"xf", "db"}:
+        return False
+    if key == "mm_pace" and value not in {"fast", "normal", "calm"}:
+        return False
+    if key == "mm_tq" and value not in {"hd", "turbo"}:
+        return False
+    return True
+
+
+def _read_local_settings():
+    if not LOCAL_SETTINGS.exists():
+        return {}
+    try:
+        raw = json.loads(LOCAL_SETTINGS.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {key: value.strip() for key, value in raw.items()
+            if key in SAFE_SETTING_KEYS and _setting_usable(key, value)}
 
 
 async def api_local_settings(req):
     if req.method == "GET":
-        if not LOCAL_SETTINGS.exists():
-            return web.json_response({"settings": {}})
-        try:
-            return web.json_response({"settings": json.loads(LOCAL_SETTINGS.read_text(encoding="utf-8"))})
-        except Exception:
-            return web.json_response({"settings": {}, "error": "本地设置文件读取失败"}, status=500)
+        return web.json_response({"settings": _read_local_settings()})
 
     try:
         body = await req.json()
     except Exception:
         return web.json_response({"error": "请求体不是 JSON"}, status=400)
     incoming = body.get("settings") or {}
-    clean = {}
+    clean = _read_local_settings()
     for key in SAFE_SETTING_KEYS:
         value = incoming.get(key)
-        if isinstance(value, str):
+        if _setting_usable(key, value):
             clean[key] = value.strip()
     LOCAL_SETTINGS.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     return web.json_response({"ok": True, "saved": sorted(clean.keys())})
@@ -306,11 +339,19 @@ async def ws_asr(req):
 
     # 浏览器 → 讯飞：攒够 1280 字节发一帧（约 40ms），尾音不足也及时补发，避免延迟
     buf = bytearray()
+    rx_bytes = 0
+    last_dbg = 0.0
 
     async def pump_up():
-        nonlocal buf
+        nonlocal buf, rx_bytes, last_dbg
         async for msg in ws_client:
             if msg.type == aiohttp.WSMsgType.BINARY:
+                rx_bytes += len(msg.data)
+                now = time.time()
+                if now - last_dbg > 1.0:
+                    last_dbg = now
+                    with contextlib.suppress(Exception):
+                        await ws_client.send_json({"type": "debug", "msg": f"server received audio {rx_bytes} bytes"})
                 buf += msg.data
                 while len(buf) >= 1280:
                     chunk = bytes(buf[:1280]); del buf[:1280]
@@ -318,6 +359,8 @@ async def ws_asr(req):
                         await ws_xf.send_bytes(chunk)
                     await asyncio.sleep(0.04)
             elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
+                with contextlib.suppress(Exception):
+                    await ws_client.send_json({"type": "debug", "msg": "server received stop"})
                 # 结束标识：讯飞要求发 binary message，内容是 {"end": true}
                 with contextlib.suppress(Exception):
                     if buf:
@@ -520,7 +563,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-07-14.gem1"
+BUILD = "2026-08-03.voice-stable"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -764,6 +807,6 @@ def make_app():
 
 
 if __name__ == "__main__":
-    print(f"\n  Uplink 已就位（build {BUILD}）→  打开浏览器访问  http://localhost:8800")
+    print(f"\n  Uplink 已就位（build {BUILD}）→  打开浏览器访问  http://127.0.0.1:8800/")
     print(f"  豆包识别模块：{'已加载 ✓' if _DB_OK else '未加载 ✗ ' + _DB_ERR}\n")
     web.run_app(make_app(), host="127.0.0.1", port=8800, print=None)

@@ -279,11 +279,18 @@ async def doubao_relay(req):
     async def pump_up():
         """浏览器 PCM → 火山：每段发声一条会话，按需开、闲置关、坏了重开。"""
         fail_streak = 0
+        rx_bytes = 0
+        last_dbg = 0.0
         async for msg in ws_client:
             if msg.type == aiohttp.WSMsgType.BINARY:
                 if not msg.data:
                     continue
+                rx_bytes += len(msg.data)
                 st["last_audio"] = asyncio.get_event_loop().time()
+                if st["last_audio"] - last_dbg > 1.0:
+                    last_dbg = st["last_audio"]
+                    with contextlib.suppress(Exception):
+                        await ws_client.send_json({"type": "debug", "msg": f"server received audio {rx_bytes} bytes"})
                 if not await ensure_session():
                     fail_streak += 1
                     if fail_streak >= 20:   # 连续 ~5 秒都开不出会话才真放弃
@@ -297,7 +304,15 @@ async def doubao_relay(req):
                 except Exception:
                     st["ws"] = None        # 发送失败：标记失效，下一包重开
             elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
-                await close_session()      # 显式结束本轮（前端目前不发，保留兼容）
+                with contextlib.suppress(Exception):
+                    await ws_client.send_json({"type": "debug", "msg": "server received stop"})
+                if st["ws"] is not None and not st["ws"].closed:
+                    st["seq"] += 1
+                    with contextlib.suppress(Exception):
+                        await st["ws"].send_bytes(_audio_request(st["seq"], b"", last=True))
+                    # 豆包的最终结果可能在结束帧后晚到；过早关掉 reader 会让前端永远拿不到最后一句。
+                    await asyncio.sleep(2.4)
+                await close_session()
             elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                 return
 

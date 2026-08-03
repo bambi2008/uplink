@@ -32,7 +32,7 @@
 ```bash
 pip install -r requirements.txt
 python server.py
-# 打开 http://localhost:8800，点「通讯设置」填入密钥，然后「建立通讯」
+# 打开 http://127.0.0.1:8800/，点「通讯设置」填入密钥，然后「建立通讯」
 ```
 
 Windows 可直接双击 `启动Jake.bat`，macOS 双击 `启动Jake.command`（自动装依赖并打开浏览器）。
