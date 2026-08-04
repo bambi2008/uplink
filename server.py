@@ -68,6 +68,9 @@ ENV_XF_APIKEY = os.environ.get("XF_APIKEY", "")
 
 
 def key_from(req):
+    saved = _read_local_settings().get("mm_key", "")
+    if saved:
+        return saved
     auth = req.headers.get("Authorization", "")
     if isinstance(auth, str) and auth.lower().startswith("bearer "):
         return auth[7:].strip()
@@ -75,7 +78,7 @@ def key_from(req):
 
 
 def group_from(req):
-    return req.headers.get("X-MM-Group") or ENV_GROUP
+    return _read_local_settings().get("mm_group", "") or req.headers.get("X-MM-Group") or ENV_GROUP
 
 
 def xf_handshake_url(appid, apikey):
@@ -273,7 +276,7 @@ async def mm_chat_once(key, messages, temperature=0.7):
 
 async def api_tts(req):
     body = await req.json()
-    key = key_from(req)
+    key = _read_local_settings().get("mm_tts_key", "") or key_from(req)
     group = group_from(req)
     if not key:
         return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)

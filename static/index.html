@@ -393,7 +393,10 @@ async function restoreLocalSettings(){
     const j=await r.json(), settings=j.settings||{};
     let restored=0;
     SETTING_KEYS.forEach(k=>{
-      if(settingUsable(k,settings[k]) && !settingUsable(k,sGet(k))){ sSet(k,cleanToken(settings[k])); restored++; }
+      if(settingUsable(k,settings[k])){
+        const value=cleanToken(settings[k]);
+        if(sGet(k)!==value){ sSet(k,value); restored++; }
+      }
     });
     if(restored) setStatus('已从本机私有设置恢复通讯密钥。');
   }catch(e){}
@@ -569,6 +572,7 @@ function renderVoices(){
     const b=e.target.closest('button'); if(!b)return; e.preventDefault();
     if($('keyInput').value.trim()) sSet('mm_key',$('keyInput').value.trim());
     if($('ttsKeyInput').value.trim()) sSet('mm_tts_key',cleanToken($('ttsKeyInput').value));
+    await saveLocalSettings();
     if(!sGet('mm_key')){alert('先填 API Key 才能试听');return;}
     const old=b.textContent; b.textContent='…'; b.disabled=true;
     try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '');
