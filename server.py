@@ -68,7 +68,10 @@ ENV_XF_APIKEY = os.environ.get("XF_APIKEY", "")
 
 
 def key_from(req):
-    return req.headers.get("X-MM-Key") or ENV_KEY
+    auth = req.headers.get("Authorization", "")
+    if isinstance(auth, str) and auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (req.headers.get("X-MM-Key") or ENV_KEY).strip()
 
 
 def group_from(req):

@@ -456,6 +456,7 @@ function hdrs(extra){
   const h={'Content-Type':'application/json'}, mm=cleanToken(sGet('mm_key')), group=cleanToken(sGet('mm_group'));
   if(!latinHeaderOk(mm)||!latinHeaderOk(group)) throw new Error('MiniMax API Key / GroupId 含有非英文字符，请点「通讯设置」重新粘贴。');
   h['X-MM-Key']=mm;
+  h['Authorization']='Bearer '+mm;
   if(group) h['X-MM-Group']=group;
   return Object.assign(h,extra||{});
 }
