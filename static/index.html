@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<script>
+  // Double-clicking this file should still land on the local HTTP app.
+  if (window.location.protocol === 'file:') {
+    window.location.replace('http://127.0.0.1:8800/');
+  }
+</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Uplink · 和 Jake 通话</title>
