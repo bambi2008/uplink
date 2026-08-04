@@ -212,7 +212,7 @@ async def api_chat(req):
     resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     await resp.prepare(req)
 
-    payload = {"model": CHAT_MODEL, "temperature": 0.8, "stream": True, "messages": messages}
+    payload = {"model": CHAT_MODEL, "temperature": 0.65, "stream": True, "messages": messages}
     # 流式状态机：过滤掉可能跨数据块的 <think>...</think> 思考段
     in_think = False
     carry = ""  # 暂存可能是"半个标签"的尾部，避免标签被切断漏判

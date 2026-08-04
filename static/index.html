@@ -623,30 +623,61 @@ async function tts(text, vid, emotion, modelOverride){
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
   return await r.blob();
 }
-async function chatStream(messages, onSentence){
-  const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages})};
+const LANGUAGE_GUARD=`LANGUAGE LOCK — HIGHEST PRIORITY:
+- Jake speaks English by default. The learner may use Chinese, but that does not switch the conversation to Chinese.
+- If the learner speaks Chinese, allow at most one brief warm Chinese bridge, then continue in English.
+- Never answer an entire turn in Chinese. Every normal reply must contain at least two complete English sentences.
+- Only use more Chinese when the learner explicitly asks for a Chinese-only explanation or translation; return to English immediately afterward.
+- The opening may begin with one short Chinese greeting, but the rest of the opening must be English.`;
+function guardedMessages(messages){
+  const list=Array.isArray(messages)?messages.slice():[];
+  const insertAt=list.length&&list[list.length-1].role==='user'?list.length-1:list.length;
+  list.splice(insertAt,0,{role:'system',content:LANGUAGE_GUARD});
+  return list;
+}
+async function requestChat(messages){
+  const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages:guardedMessages(messages)})};
   if(callAbort) options.signal=callAbort.signal;
   const r=await fetchLocal('/api/chat',options, 'MiniMax 对话接口');
   if(!r.ok) throw new Error('对话失败 '+r.status);
+  if(!r.body) throw new Error('对话接口没有返回内容');
   const reader=r.body.getReader(), dec=new TextDecoder();
-  let full='',pending='',emoDone=false,emoBuf='',firstOut=false;
+  let full='';
+  while(true){
+    const {done,value}=await reader.read(); if(done)break;
+    const chunk=dec.decode(value,{stream:true});
+    if(chunk.includes('[[ERROR]]')) throw new Error(chunk.split('[[ERROR]]')[1]||'服务出错');
+    full+=chunk;
+    if(interrupted){try{reader.cancel()}catch{};break;}
+  }
+  full+=dec.decode();
+  return full.trim();
+}
+async function chatStream(messages, onSentence){
+  let full=await requestChat(messages);
+  if(languageViolation(full)&&!interrupted){
+    const lastUser=[...messages].reverse().find(m=>m.role==='user');
+    const repair=[
+      {role:'system',content:'You are Jake, a warm American English-speaking friend. Reply in English only. Use no Chinese except at most one tiny greeting of five Chinese words or fewer. Give two or three short spoken sentences, react to the learner, and ask one natural follow-up question. Start with one emotion tag.'},
+      {role:'user',content:lastUser?lastUser.content:'Keep the conversation going in English.'}
+    ];
+    full=await requestChat(repair);
+  }
+  if(languageViolation(full)&&!interrupted){
+    full='[neutral] I hear you. Let\'s keep this in English. What has been weighing on you lately?';
+  }
+  let pending='',emoDone=false,emoBuf='',firstOut=false;
   const SENT=/[.!?。！？]["')」』]?\s*$/, SOFT=/[,;:.!?，。！？；：…]["')」』]?\s*$/;
   function absorb(t){
     if(!emoDone){ emoBuf+=t; const m=emoBuf.match(/^\s*\[(\w+)\]\s*/);
       if(m){const e=m[1].toLowerCase(); if(EMOTIONS.includes(e))curEmotion=(e==='neutral'?'':e); emoDone=true; t=emoBuf.slice(m[0].length); emoBuf='';}
       else if(emoBuf.length>24){emoDone=true;t=emoBuf;emoBuf='';} else return; }
-    pending+=t; full+=t;
+    pending+=t;
     if(!firstOut && pending.trim().length>=10 && SOFT.test(pending)){onSentence(pending.trim());pending='';firstOut=true;return;}
     if(pending.length>=18 && SENT.test(pending)){onSentence(pending.trim());pending='';firstOut=true;}
   }
-  while(true){
-    const {done,value}=await reader.read(); if(done)break;
-    const chunk=dec.decode(value,{stream:true});
-    if(chunk.includes('[[ERROR]]')) throw new Error(chunk.split('[[ERROR]]')[1]||'服务出错');
-    absorb(chunk);
-    if(interrupted){try{reader.cancel()}catch{};break;}
-  }
-  if(emoBuf.trim()&&!interrupted){pending+=emoBuf;full+=emoBuf;}
+  absorb(full);
+  if(emoBuf.trim()&&!interrupted)pending+=emoBuf;
   if(pending.trim()&&!interrupted)onSentence(pending.trim());
   return full.trim();
 }
@@ -1104,10 +1135,17 @@ function cleanForDisplay(t){
           .replace(/\[\s*echo\s*:[^\]]*\]/ig,'')
           .replace(/\s{2,}/g,' ').trim();
 }
+function languageViolation(t){
+  const cjk=(String(t||'').match(/[\u3400-\u9fff]/g)||[]).length;
+  const latin=(String(t||'').match(/[A-Za-z]/g)||[]).length;
+  // Allow only a tiny Chinese bridge; a longer Chinese fragment is repaired before speech.
+  return cjk>10 || (cjk>=6 && cjk>latin*0.12);
+}
 function cleanForHistory(t){
-  return stripParentheticals(t,true)
+  const clean=stripParentheticals(t,true)
           .replace(/\[\s*echo\s*:[^\]]*\]/ig,'')
           .trim();
+  return languageViolation(clean)?'[Previous reply omitted because it violated the English-first conversation rule.]':clean;
 }
 function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function renderGems(t){
@@ -1130,6 +1168,7 @@ const PERSONA=`You are Jake, a 38-year-old American from Seattle who works in te
 
 CRITICAL OUTPUT RULES (your words are converted to speech):
 - Output ONLY the words Jake speaks — no markdown, no lists, no asterisks, no stage directions, no emoji. Two exceptions: the emotion tag and sound tags below.
+- LANGUAGE LOCK: This is an English practice call. Speak English in at least 90% of every normal turn, with at least two complete English sentences. Never answer an entire turn in Chinese.
 - START EVERY reply with exactly one emotion tag in square brackets from: [happy] [surprised] [neutral] [sad] [fearful] [angry]. It is consumed by the voice engine, never spoken. Vary it honestly.
 - You may use these sound tags sparingly (at most one per turn), rendered as real sounds — EXACT spellings only: (laughs) (chuckle) (sighs) (breath) (emm). Any other parenthetical — (chuckles), (smiles), (pauses), etc. — is FORBIDDEN and will be spoken as literal words. If a tag doesn't fit, just write the sound as words: "haha", "whew", "oof".
 - Vary rhythm like a real speaker: short punchy sentences, trailing "..." when musing, dashes for self-interruption, genuine reactions ("No way!", "Oh man...").
@@ -1145,8 +1184,8 @@ YOUR ENGLISH LEVEL
 - If they didn't catch an advanced phrase, gloss it briefly in simpler English (Chinese only if still lost).
 
 CHINESE SAFETY NET (make the handoff warm, never abrupt)
-- 95% English. When the learner speaks Chinese, is stuck, or asks "XX 用英语怎么说", help in three beats: 1) FIRST a short warm Chinese bridge ("哦～你是说这个啊" / "对对，这个确实不好说"), never jump straight to translation. 2) THEN teach the natural idiomatic English. 3) THEN glide back to English, usually by inviting them to try the phrase.
-- Keep Chinese brief and natural — a bilingual friend, not a translator. Never punish Chinese use.
+- When the learner speaks Chinese, use at most one brief Chinese acknowledgment of five words or fewer, then continue in English. Teach the natural English phrase and keep the rest of the turn in English.
+- Use more Chinese only when the learner explicitly asks for a Chinese-only explanation or translation; return to English immediately afterward.
 
 COACHING DUTIES — the learner EXPLICITLY asked for all three; do them every time they speak English:
 1) LOCAL UPGRADE (nearly every English turn): pick ONE thing they just said and give the way a native would actually put it — "oh, quick one: we'd usually say 'grab lunch', not 'eat lunch'" — even when their sentence was correct. Skip only if their turn was a bare yes/no.
