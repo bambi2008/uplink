@@ -109,11 +109,11 @@ async def favicon(req):
 
 
 SAFE_SETTING_KEYS = {
-    "mm_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
+    "mm_key", "mm_tts_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token", "user_name", "asr_engine", "mm_pace", "mm_tq", "mm_voice",
 }
 TOKEN_SETTING_KEYS = {
-    "mm_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
+    "mm_key", "mm_tts_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token",
 }
 
@@ -296,7 +296,12 @@ async def api_tts(req):
             j = await r.json()
     hexaudio = (j.get("data") or {}).get("audio")
     if not hexaudio:
-        return web.json_response({"error": str(j.get("base_resp") or j)[:200]}, status=502)
+        base_resp = j.get("base_resp") or {}
+        if base_resp.get("status_code") == 1004:
+            return web.json_response({
+                "error": "MiniMax 语音接口拒绝了当前 Key（1004）。请在通讯设置填写可调用语音的 API Key；聊天 Key 可以继续保留。"
+            }, status=502)
+        return web.json_response({"error": str(base_resp or j)[:200]}, status=502)
     audio = bytes.fromhex(hexaudio)
     return web.Response(body=audio, content_type="audio/mpeg")
 

@@ -268,6 +268,9 @@
       </div>
       <label>MiniMax API Key（必填）</label>
       <input id="keyInput" type="password" placeholder="粘贴你的 MiniMax API Key">
+      <label>MiniMax 语音 API Key（可选）</label>
+      <input id="ttsKeyInput" type="password" placeholder="语音专用 Key；留空则沿用上面的 Key">
+      <div style="font-size:11.5px;color:var(--fog);line-height:1.6;margin-top:4px">如果试听提示 1004，请在 MiniMax「接口密钥」里创建有语音额度的 API Key 填这里；上面的聊天 Key 不用更换。</div>
       <label>GroupId（选填）</label>
       <input id="groupInput" type="text" placeholder="可留空">
       <label style="margin-top:18px">你的英文名（Jake 打招呼时怎么称呼你）</label>
@@ -360,8 +363,8 @@ function tokenProblem(label,v){
   return '';
 }
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
-const SETTING_KEYS=['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
-const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
+const SETTING_KEYS=['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
+const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
 let settingsReady=null;
 function settingUsable(k,v){
   const value=cleanToken(v);
@@ -452,8 +455,8 @@ function validateKeysForCall(){
   const bad=problems.filter(Boolean);
   if(bad.length) throw new Error(bad.join('；')+'。请点「通讯设置」重新粘贴。');
 }
-function hdrs(extra){
-  const h={'Content-Type':'application/json'}, mm=cleanToken(sGet('mm_key')), group=cleanToken(sGet('mm_group'));
+function hdrs(extra,keyOverride){
+  const h={'Content-Type':'application/json'}, mm=cleanToken(keyOverride||sGet('mm_key')), group=cleanToken(sGet('mm_group'));
   if(!latinHeaderOk(mm)||!latinHeaderOk(group)) throw new Error('MiniMax API Key / GroupId 含有非英文字符，请点「通讯设置」重新粘贴。');
   h['X-MM-Key']=mm;
   h['Authorization']='Bearer '+mm;
@@ -541,7 +544,7 @@ const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 /* ---------- 设置弹窗 ---------- */
 $('btnKey').onclick=async ()=>{
   await ensureLocalSettings();
-  $('keyInput').value=sGet('mm_key'); $('groupInput').value=sGet('mm_group');
+  $('keyInput').value=sGet('mm_key'); $('ttsKeyInput').value=sGet('mm_tts_key'); $('groupInput').value=sGet('mm_group');
   $('xfAppid').value=sGet('xf_appid'); $('xfApikey').value=sGet('xf_apikey');
   $('dbAppid').value=sGet('db_appid'); $('dbToken').value=sGet('db_token');
   $('unName').value=sGet('user_name');
@@ -565,6 +568,7 @@ function renderVoices(){
   box.onclick=async e=>{
     const b=e.target.closest('button'); if(!b)return; e.preventDefault();
     if($('keyInput').value.trim()) sSet('mm_key',$('keyInput').value.trim());
+    if($('ttsKeyInput').value.trim()) sSet('mm_tts_key',cleanToken($('ttsKeyInput').value));
     if(!sGet('mm_key')){alert('先填 API Key 才能试听');return;}
     const old=b.textContent; b.textContent='…'; b.disabled=true;
     try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '');
@@ -574,10 +578,11 @@ function renderVoices(){
 }
 $('keySave').onclick=async ()=>{
   const v=cleanToken($('keyInput').value); if(!v){alert('请粘贴 MiniMax API Key');return;}
+  const ttsKey=cleanToken($('ttsKeyInput').value);
   const g=cleanToken($('groupInput').value);
-  const bad=[tokenProblem('MiniMax API Key',v), g?tokenProblem('MiniMax GroupId',g):''].filter(Boolean);
+  const bad=[tokenProblem('MiniMax API Key',v), ttsKey?tokenProblem('MiniMax 语音 API Key',ttsKey):'', g?tokenProblem('MiniMax GroupId',g):''].filter(Boolean);
   if(bad.length){ alert(bad.join('\n')); return; }
-  sSet('mm_key',v); sSet('mm_group',g);
+  sSet('mm_key',v); sSet('mm_tts_key',ttsKey); sSet('mm_group',g);
   sSet('xf_appid',cleanToken($('xfAppid').value)); sSet('xf_apikey',cleanToken($('xfApikey').value));
   sSet('db_appid',cleanToken($('dbAppid').value)); sSet('db_token',cleanToken($('dbToken').value));
   sSet('user_name',$('unName').value.trim().replace(/\b[a-z]/g,c=>c.toUpperCase()));
@@ -600,7 +605,7 @@ async function tts(text, vid, emotion, modelOverride){
   let boost='auto';
   if(cjk===0) boost='English';
   else if(cjk>latin) boost='Chinese';
-  const r=await fetchLocal('/api/tts',{method:'POST',headers:hdrs(),
+  const r=await fetchLocal('/api/tts',{method:'POST',headers:hdrs({},sGet('mm_tts_key')||sGet('mm_key')),
     body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
       model, language_boost: boost})}, '语音合成接口');
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
