@@ -543,6 +543,7 @@ let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     audioQueue=[], playing=false, curAudio=null, genDone=true, interrupted=false,
     asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
+let callAbort=null, fillGeneration=0;
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
 /* ---------- 设置弹窗 ---------- */
@@ -614,14 +615,18 @@ async function tts(text, vid, emotion, modelOverride){
   let boost='auto';
   if(cjk===0) boost='English';
   else if(cjk>latin) boost='Chinese';
-  const r=await fetchLocal('/api/tts',{method:'POST',headers:hdrs({},sGet('mm_tts_key')||sGet('mm_key')),
+  const options={method:'POST',headers:hdrs({},sGet('mm_tts_key')||sGet('mm_key')),
     body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
-      model, language_boost: boost})}, '语音合成接口');
+      model, language_boost: boost})};
+  if(callAbort) options.signal=callAbort.signal;
+  const r=await fetchLocal('/api/tts',options, '语音合成接口');
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
   return await r.blob();
 }
 async function chatStream(messages, onSentence){
-  const r=await fetchLocal('/api/chat',{method:'POST',headers:hdrs(),body:JSON.stringify({messages})}, 'MiniMax 对话接口');
+  const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages})};
+  if(callAbort) options.signal=callAbort.signal;
+  const r=await fetchLocal('/api/chat',options, 'MiniMax 对话接口');
   if(!r.ok) throw new Error('对话失败 '+r.status);
   const reader=r.body.getReader(), dec=new TextDecoder();
   let full='',pending='',emoDone=false,emoBuf='',firstOut=false;
@@ -680,10 +685,18 @@ async function prepFillers(){
   /* 两池分工：
      acks   = 老师式接话确认，用户一说完 100% 立刻播一个 → 消灭"接话慢"的体感
      thinks = 思考音，只用于 Jake 说话中途生成卡顿时填缝 */
+  const generation=++fillGeneration;
+  ackBlobs=[]; fillerBlobs=[];
   const acks=['OK!','Mm-hm.','Right.','Alright—','Ah, okay.','Oh, nice.','Got it.'];
   const thinks=['Hmm...','Mm...','(emm)','So—','Well—','Uh, let me see...','Right, so—','And, um—'];
-  for(const t of acks){ try{ ackBlobs.push(await tts(t,null,'')); }catch(e){} }
-  for(const t of thinks){ try{ fillerBlobs.push(await tts(t,null,'')); }catch(e){} }
+  for(const t of acks){
+    if(!active||generation!==fillGeneration)return;
+    try{ const blob=await tts(t,null,''); if(active&&generation===fillGeneration)ackBlobs.push(blob); }catch(e){}
+  }
+  for(const t of thinks){
+    if(!active||generation!==fillGeneration)return;
+    try{ const blob=await tts(t,null,''); if(active&&generation===fillGeneration)fillerBlobs.push(blob); }catch(e){}
+  }
 }
 let lastFiller=-1, lastAck=-1;
 function playFiller(){
@@ -717,25 +730,36 @@ async function pumpQueue(){
 
 /* 播放一段语音；被浏览器自动播放策略拦截时，提示用户点一下解锁并在点击后重播 */
 let audioUnlocked=false;
+let stopCurrentAudio=()=>{};
 function playBlob(blob){
   return new Promise(res=>{
-    curAudio=new Audio(URL.createObjectURL(blob));
-    curAudio.onended=()=>{audioUnlocked=true;res();};
-    curAudio.onerror=()=>{ setStatus('⚠️ 音频播放出错（设备/驱动问题）'); res(); };
-    curAudio.play().then(()=>{audioUnlocked=true;}).catch(err=>{
+    const url=URL.createObjectURL(blob), audio=new Audio(url);
+    let done=false, unlockHandler=null;
+    const finish=()=>{
+      if(done)return;
+      done=true; audioUnlocked=true; URL.revokeObjectURL(url);
+      if(unlockHandler){document.removeEventListener('pointerdown',unlockHandler);unlockHandler=null;}
+      if(curAudio===audio)curAudio=null;
+      if(stopCurrentAudio===finish)stopCurrentAudio=()=>{};
+      res();
+    };
+    stopCurrentAudio=finish; curAudio=audio;
+    audio.onended=finish;
+    audio.onerror=()=>{ setStatus('⚠️ 音频播放出错（设备/驱动问题）'); finish(); };
+    audio.play().then(()=>{audioUnlocked=true;}).catch(err=>{
       if(!audioUnlocked){
         setStatus('🔊 浏览器拦了声音 · <b>请点击页面任意位置解锁</b>');
-        const once=()=>{ document.removeEventListener('pointerdown',once);
-          curAudio.play().then(()=>{audioUnlocked=true;setStatus('TRANSMISSION · Jake 正在说…');}).catch(()=>res()); };
-        document.addEventListener('pointerdown',once);
-        curAudio.onended=()=>{audioUnlocked=true;res();};
-      } else { res(); }
+        unlockHandler=()=>{
+          unlockHandler=null;
+          audio.play().then(()=>{audioUnlocked=true;setStatus('TRANSMISSION · Jake 正在说…');}).catch(finish); };
+        document.addEventListener('pointerdown',unlockHandler);
+      } else { finish(); }
     });
   });
 }
 $('haloWrap').onclick=()=>{
   if(phase!=='speaking')return;
-  interrupted=true; if(curAudio){try{curAudio.pause()}catch{}curAudio=null;} audioQueue=[]; playing=false;
+  interrupted=true; const audio=curAudio; stopCurrentAudio(); if(audio){try{audio.pause()}catch{}} audioQueue=[]; playing=false;
   history.push({role:'user',content:'(The learner interrupted you mid-sentence — let them speak.)'});
   startListening();
 };
@@ -776,27 +800,39 @@ async function openMic(){
       }
       /* 跟读评测旁路：Jake 要求跟读时，这轮音频留一份（上限30秒），说完送去发音评测 */
       if(pendingEcho&&echoChunks.reduce((n,c)=>n+c.length,0)<16000*30) echoChunks.push(i16);
-      if(asrWS&&asrWS.readyState===1) asrWS.send(i16.buffer);
+      if(asrWS&&asrWS.readyState===1){ try{ asrWS.send(i16.buffer); }catch(e){} }
     };
     micPipeOk=true; earDiag('麦克风 · 已授权，等待你说话');
-  }catch(e){ audioCtx=null; micNode=null; micPipeOk=false; earDiag('麦克风 · 未建立音频管线，准备使用浏览器备用识别'); }
+  }catch(e){
+    try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
+    try{if(audioCtx)audioCtx.close();}catch{}
+    try{if(micStream)micStream.getTracks().forEach(t=>t.stop());}catch{}
+    audioCtx=null; micNode=null; micStream=null; micPipeOk=false;
+    earDiag('麦克风 · 未建立音频管线，准备使用浏览器备用识别');
+  }
 }
 let asrOk=false, asrTries=0, usingFallback=false;
-let pendingEcho=null, echoChunks=[], engQ=null;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
-function failEngine(reason){
+let pendingEcho=null, echoChunks=[], engQ=null, asrGeneration=0, engineFailing=false;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
+function failEngine(reason,failedWS){
   /* 当前引擎连不上：切队列里下一家（豆包↔讯飞热备份），都没了才退浏览器备用 */
+  if(failedWS&&failedWS!==asrWS)return;
+  if(engineFailing)return;
+  engineFailing=true;
   const dead=engQ&&engQ.shift();
   console.warn('识别引擎失效:',dead,reason);
   asrOk=false; asrTries=0;
+  const old=asrWS; asrWS=null;
+  if(old){ old.onclose=null; old.onerror=null; try{old.close();}catch{} }
   earDiag('识别 · '+reason);
   if(engQ&&engQ.length){
     $('conn').innerHTML='识别 · 切换备用引擎（'+(engQ[0]==='db'?'豆包':'讯飞')+'）…';
-    setTimeout(connectASR,300);
-  } else startFallbackASR(reason);
+    setTimeout(()=>{engineFailing=false; if(active&&!usingFallback)connectASR();},300);
+  } else { engineFailing=false; startFallbackASR(reason); }
 }
 function connectASR(){
   /* 采集管线（WebAudio）没建起来，就没法给后端送音频 → 必须走备用识别 */
   if(!micPipeOk){ startFallbackASR('浏览器音频管线未建立（WebAudio 初始化失败）'); return; }
+  if(engineFailing)return;
   const pref=sGet('asr_engine')||'xf';
   if(!engQ||!engQ.length){
     engQ=[];
@@ -813,17 +849,19 @@ function connectASR(){
   }else{
     url=proto+'://'+location.host+'/ws/asr?appid='+encodeURIComponent(sGet('xf_appid'))+'&apikey='+encodeURIComponent(sGet('xf_apikey'));
   }
-  try{ asrWS=new WebSocket(url); }
+  let ws;
+  try{ ws=new WebSocket(url); }
   catch(e){ failEngine('WebSocket 创建失败：'+e); return; }
-  asrWS.binaryType='arraybuffer';
-  asrWS.onmessage=ev=>{
+  const generation=++asrGeneration; asrWS=ws; ws.binaryType='arraybuffer';
+  ws.onmessage=ev=>{
+    if(generation!==asrGeneration||ws!==asrWS)return;
     let d; try{d=JSON.parse(ev.data)}catch{return;}
     if(d.type==='ready'){ asrOk=true; asrTries=0;
       const pref=sGet('asr_engine')||'xf';
       $('conn').innerHTML='识别连接 <b>已就绪</b>（'+(engine==='db'?'豆包':'讯飞')+(engine!==pref?' · 热备援':'')+'）';
       earDiag(phase==='listening'?'现在轮到你说 · 中文英文都可以':'耳朵 · 已接通，等 Jake 说完才开始听你'); return; }
     if(d.type==='debug'){ earDiag('诊断 · '+d.msg); return; }
-    if(d.type==='error'){ failEngine((engine==='db'?'豆包':'讯飞')+'后端报错：'+(d.msg||'未知')); return; }
+    if(d.type==='error'){ failEngine((engine==='db'?'豆包':'讯飞')+'后端报错：'+(d.msg||'未知'),ws); return; }
     if(d.type==='asr' && phase==='listening'){
       asrLastText=Date.now();
       earDiag('耳朵 · 已识别到文字');
@@ -831,16 +869,17 @@ function connectASR(){
       else { showPartial(d.text); armSilence(); }
     }
   };
-  asrWS.onclose=()=>{
+  ws.onclose=()=>{
+    if(generation!==asrGeneration||ws!==asrWS||engineFailing)return;
     if(!active||usingFallback||turnClosing) return;
     asrTries++;
     if(asrOk && asrTries<4){ $('conn').innerHTML='识别连接 · 重连中…'; setTimeout(connectASR,800); }
     else if(!asrOk){
-      failEngine('通道「'+(engine==='db'?'/ws/doubao':'/ws/asr')+'」在就绪前被关闭（server 未重启/路由缺失/后端拒绝）');
+      failEngine('通道「'+(engine==='db'?'/ws/doubao':'/ws/asr')+'」在就绪前被关闭（server 未重启/路由缺失/后端拒绝）',ws);
     }
-    else { failEngine('重连 '+asrTries+' 次未成功'); }
+    else { failEngine('重连 '+asrTries+' 次未成功',ws); }
   };
-  asrWS.onerror=()=>{};
+  ws.onerror=()=>{};
 }
 
 function restartASR(reason){
@@ -1157,11 +1196,12 @@ function withTimeout(promise,ms,name){
 
 async function startCall(){
   if(active||$('btnStart').disabled) return;   // 防重复触发
-  await ensureLocalSettings();
+  try{ await ensureLocalSettings(); }catch(e){ setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
   if(!sGet('mm_key')){ $('keyOverlay').style.display='flex'; return; }
   try{ validateKeysForCall(); }catch(e){ setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
   $('btnStart').textContent='◉ 通讯建立中…';   // 按下瞬间立刻给反馈
+  callAbort=typeof AbortController==='function'?new AbortController():null;
   step(1,'接收地面简报 UPLINK…（最多15秒）');
   setTimeout(()=>{ try{ playEntranceSound(); }catch(e){} },50);  // 音效延后，绝不拖慢首屏反馈
   try{
@@ -1216,6 +1256,9 @@ function startTimer(){
   },1000);
 }
 function cleanup(){
+  fillGeneration++;
+  if(callAbort){try{callAbort.abort();}catch{} callAbort=null;}
+  const oldAudio=curAudio; stopCurrentAudio(); if(oldAudio){try{oldAudio.pause();}catch{}}
   try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
   try{if(micSource)micSource.disconnect()}catch{}
   try{if(micSink)micSink.disconnect()}catch{}
@@ -1226,6 +1269,7 @@ function cleanup(){
   clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer);
   turnClosing=false;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
+  ackBlobs=[]; fillerBlobs=[]; lastFiller=-1; lastAck=-1;
   fbLang='zh-CN'; asrOk=false; asrTries=0; earDiag('');
 }
 async function endCall(showReport){

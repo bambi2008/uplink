@@ -1,8 +1,9 @@
 #!/bin/bash
-# macOS one-click launcher
+set -e
 cd "$(dirname "$0")"
-echo "Preparing Uplink (first run installs aiohttp; network required)..."
-python3 -m pip install --quiet --user aiohttp 2>/dev/null || python3 -m pip install --quiet --break-system-packages aiohttp 2>/dev/null
-echo "Starting... browser will open http://127.0.0.1:8800/"
-( sleep 2 && open http://127.0.0.1:8800/ ) &
-python3 server.py
+if ! python3 -c "import aiohttp" >/dev/null 2>&1; then
+  echo "Installing dependencies for the first run..."
+  python3 -m pip install --user -r requirements.txt 2>/dev/null || \
+    python3 -m pip install --break-system-packages -r requirements.txt
+fi
+exec python3 launcher.py

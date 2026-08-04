@@ -51,6 +51,8 @@ except Exception as _e:
 ROOT = pathlib.Path(__file__).parent
 STATIC = ROOT / "static"
 LOCAL_SETTINGS = ROOT / "local-settings.json"
+SERVER_HOST = os.environ.get("UPLINK_HOST", "127.0.0.1")
+SERVER_PORT = int(os.environ.get("UPLINK_PORT", "8800"))
 
 MINIMAX_BASE = "https://api.minimaxi.com"      # MiniMax 负责"想+说"
 XF_RTASR_HOST = "rtasr.xfyun.cn"               # 讯飞负责"听"（实时语音转写）
@@ -58,6 +60,8 @@ XF_RTASR_HOST = "rtasr.xfyun.cn"               # 讯飞负责"听"（实时语�
 CHAT_MODEL = "MiniMax-Text-01"                 # 非思考型：不打腹稿，接话快
 CHAT_MODEL_FALLBACK = "MiniMax-M2.5-highspeed" # 若上者不可用自动回退
 TTS_MODEL = "speech-2.8-turbo"
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=50)
+SETTINGS_LOCK = asyncio.Lock()
 
 # MiniMax（对话+合成）
 ENV_KEY = os.environ.get("MINIMAX_API_KEY", "")
@@ -173,21 +177,33 @@ async def api_local_settings(req):
         body = await req.json()
     except Exception:
         return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
     incoming = body.get("settings") or {}
-    clean = _read_local_settings()
-    for key in SAFE_SETTING_KEYS:
-        value = incoming.get(key)
-        if _setting_usable(key, value):
-            clean[key] = value.strip()
-    LOCAL_SETTINGS.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    async with SETTINGS_LOCK:
+        clean = _read_local_settings()
+        for key in SAFE_SETTING_KEYS:
+            value = incoming.get(key)
+            if _setting_usable(key, value):
+                clean[key] = value.strip()
+        tmp = LOCAL_SETTINGS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, LOCAL_SETTINGS)
     return web.json_response({"ok": True, "saved": sorted(clean.keys())})
 
 
 # ----------------------------------------------------------------- 对话（流式）
 
 async def api_chat(req):
-    body = await req.json()
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
     messages = body.get("messages", [])
+    if not isinstance(messages, list) or not messages:
+        return web.json_response({"error": "缺少对话内容"}, status=400)
     key = key_from(req)
     if not key:
         return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
@@ -228,7 +244,7 @@ async def api_chat(req):
         return "".join(out)
 
     try:
-        async with aiohttp.ClientSession() as s:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as s:
             wrote_any = False
             for model_try in (CHAT_MODEL, CHAT_MODEL_FALLBACK):
                 payload["model"] = model_try
@@ -265,14 +281,17 @@ async def api_chat(req):
 
 # 非流式对话（生成谈资、复盘用）
 async def mm_chat_once(key, messages, temperature=0.7):
-    async with aiohttp.ClientSession() as s:
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as s:
         for model_try in (CHAT_MODEL, CHAT_MODEL_FALLBACK):
             payload = {"model": model_try, "temperature": temperature, "messages": messages}
-            async with s.post(MINIMAX_BASE + "/v1/chat/completions",
-                              headers={"Authorization": "Bearer " + key,
-                                       "Content-Type": "application/json"},
-                              json=payload) as r:
-                j = await r.json()
+            try:
+                async with s.post(MINIMAX_BASE + "/v1/chat/completions",
+                                  headers={"Authorization": "Bearer " + key,
+                                           "Content-Type": "application/json"},
+                                  json=payload) as r:
+                    j = await r.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
             try:
                 txt = j["choices"][0]["message"]["content"] or ""
             except Exception:
@@ -285,11 +304,19 @@ async def mm_chat_once(key, messages, temperature=0.7):
 # ----------------------------------------------------------------- 语音合成
 
 async def api_tts(req):
-    body = await req.json()
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
     key = _read_local_settings().get("mm_tts_key", "") or key_from(req)
     group = group_from(req)
     if not key:
         return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "缺少要合成的文字"}, status=400)
 
     voice_setting = {"voice_id": body.get("voice", "English_magnetic_voiced_man"),
                      "speed": body.get("speed", 1.0)}
@@ -299,14 +326,19 @@ async def api_tts(req):
     tts_model = body.get("model") or TTS_MODEL
     lang_boost = body.get("language_boost") or "auto"
     url = MINIMAX_BASE + "/v1/t2a_v2" + (("?GroupId=" + group) if group else "")
-    payload = {"model": tts_model, "text": body.get("text", ""), "stream": False,
+    payload = {"model": tts_model, "text": text, "stream": False,
                "voice_setting": voice_setting, "language_boost": lang_boost,
                "audio_setting": {"format": "mp3"}}
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, headers={"Authorization": "Bearer " + key,
-                                        "Content-Type": "application/json"},
-                          json=payload) as r:
-            j = await r.json()
+    try:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as s:
+            async with s.post(url, headers={"Authorization": "Bearer " + key,
+                                            "Content-Type": "application/json"},
+                              json=payload) as r:
+                j = await r.json()
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "MiniMax 语音接口超时，请稍后重试"}, status=504)
+    except aiohttp.ClientError as e:
+        return web.json_response({"error": f"MiniMax 语音接口连接失败：{str(e)[:120]}"}, status=502)
     hexaudio = (j.get("data") or {}).get("audio")
     if not hexaudio:
         base_resp = j.get("base_resp") or {}
@@ -338,7 +370,7 @@ async def ws_asr(req):
         await ws_client.close()
         return ws_client
 
-    session = aiohttp.ClientSession()
+    session = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
     try:
         ws_xf = await session.ws_connect(xf_handshake_url(appid, apikey), heartbeat=20, timeout=30)
     except Exception as e:
@@ -580,14 +612,22 @@ async def api_report(req):
     convo = body.get("transcript", "")[-20000:]
     if not key or not convo:
         return web.json_response({"report": "（本次没有可用记录）"})
-    rep = await mm_chat_once(key, [{"role": "system", "content": REPORT_SYSTEM},
-                                   {"role": "user", "content": convo}], 0.6)
+    try:
+        rep = await asyncio.wait_for(
+            mm_chat_once(key, [{"role": "system", "content": REPORT_SYSTEM},
+                               {"role": "user", "content": convo}], 0.6),
+            timeout=55,
+        )
+    except asyncio.TimeoutError:
+        return web.json_response({"report": "复盘生成超时，本次通话记录仍已保存在本机。"}, status=504)
+    except (aiohttp.ClientError, OSError) as e:
+        return web.json_response({"report": f"复盘接口暂时不可用：{str(e)[:120]}"}, status=502)
     return web.json_response({"report": rep})
 
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-03.voice-stable"
+BUILD = "2026-08-04.stability-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -683,7 +723,7 @@ async def api_ise(req):
                         "text": "\ufeff" + text, "tte": "utf-8", "ttp_skip": True,
                         "rstcd": "utf8", "group": "adult"},
            "data": {"status": 0, "data": ""}}
-    session = aiohttp.ClientSession()
+    session = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
     try:
         ws = await session.ws_connect(ise_url(key, secret), timeout=15)
         await ws.send_str(json.dumps(ssb))
@@ -738,7 +778,7 @@ async def api_asr_test(req):
     """服务器亲自去连一次识别后端，把最原始的握手结果端给前端看。"""
     engine = req.query.get("engine", "xf")
     out = {"ok": False, "engine": engine, "detail": ""}
-    session = aiohttp.ClientSession()
+    session = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
     try:
         if engine == "db":
             if not _DB_OK:
@@ -834,6 +874,6 @@ def make_app():
 
 
 if __name__ == "__main__":
-    print(f"\n  Uplink 已就位（build {BUILD}）→  打开浏览器访问  http://127.0.0.1:8800/")
+    print(f"\n  Uplink 已就位（build {BUILD}）→  打开浏览器访问  http://{SERVER_HOST}:{SERVER_PORT}/")
     print(f"  豆包识别模块：{'已加载 ✓' if _DB_OK else '未加载 ✗ ' + _DB_ERR}\n")
-    web.run_app(make_app(), host="127.0.0.1", port=8800, print=None)
+    web.run_app(make_app(), host=SERVER_HOST, port=SERVER_PORT, print=None)

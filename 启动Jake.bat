@@ -1,10 +1,31 @@
 @echo off
+setlocal
 title Uplink
 cd /d "%~dp0"
-echo [Uplink] 正在准备(首次启动会自动安装一个小组件, 需联网)...
-python -m pip install --quiet aiohttp >nul 2>&1
-if errorlevel 1 py -m pip install --quiet aiohttp >nul 2>&1
-echo [Uplink] 启动中... 浏览器稍后自动打开; 若没打开, 手动访问 http://127.0.0.1:8800/
-start "" http://127.0.0.1:8800/
-python server.py 2>nul || py server.py
-pause
+
+set "PY="
+where py >nul 2>&1
+if not errorlevel 1 set "PY=py -3"
+if not defined PY (
+  where python >nul 2>&1
+  if not errorlevel 1 set "PY=python"
+)
+if not defined PY (
+  echo [Uplink] Python 3.9+ was not found. Please install Python first.
+  pause
+  exit /b 1
+)
+
+%PY% -c "import aiohttp" >nul 2>&1
+if errorlevel 1 (
+  echo [Uplink] Installing dependencies for the first run...
+  %PY% -m pip install -r requirements.txt
+  if errorlevel 1 (
+    echo [Uplink] Dependency installation failed. Check the network and retry.
+    pause
+    exit /b 1
+  )
+)
+
+%PY% launcher.py
+if errorlevel 1 pause
