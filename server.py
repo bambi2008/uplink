@@ -244,7 +244,7 @@ async def api_chat(req):
         return "".join(out)
 
     try:
-        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as s:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT, trust_env=True) as s:
             wrote_any = False
             for model_try in (CHAT_MODEL, CHAT_MODEL_FALLBACK):
                 payload["model"] = model_try
@@ -281,7 +281,7 @@ async def api_chat(req):
 
 # 非流式对话（生成谈资、复盘用）
 async def mm_chat_once(key, messages, temperature=0.7):
-    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as s:
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT, trust_env=True) as s:
         for model_try in (CHAT_MODEL, CHAT_MODEL_FALLBACK):
             payload = {"model": model_try, "temperature": temperature, "messages": messages}
             try:
@@ -330,7 +330,7 @@ async def api_tts(req):
                "voice_setting": voice_setting, "language_boost": lang_boost,
                "audio_setting": {"format": "mp3"}}
     try:
-        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as s:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT, trust_env=True) as s:
             async with s.post(url, headers={"Authorization": "Bearer " + key,
                                             "Content-Type": "application/json"},
                               json=payload) as r:
