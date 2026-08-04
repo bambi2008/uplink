@@ -649,14 +649,15 @@ async function chatStream(messages, onSentence){
 /* ---------- 语音合成播放队列 ---------- */
 let ttsErrShown=false, replySeg=0;
 const SOUND_OK={'laughs':'(laughs)','laugh':'(laughs)','laughing':'(laughs)','chuckle':'(chuckle)','chuckles':'(chuckle)','chuckling':'(chuckle)','giggles':'(chuckle)','sighs':'(sighs)','sigh':'(sighs)','sighing':'(sighs)','breath':'(breath)','emm':'(emm)'};
+function stripParentheticals(t,keepSounds){
+  return String(t||'').replace(/\(([^()\r\n]{1,160})\)/g,(m,w)=>{
+    const k=w.trim().toLowerCase().replace(/\s+/g,' ');
+    return keepSounds&&SOUND_OK[k]?SOUND_OK[k]:'';
+  }).replace(/[ \t]{2,}/g,' ').replace(/\s+([,.!?;:])/g,'$1').trim();
+}
 function sanitizeSpeech(t){
   /* 声音标签白名单归一（TTS能渲染成真实声音）；其余括号舞台说明剥掉不念 */
-  return t.replace(/\(\s*([a-z' ]{2,24})\s*\)/ig,(m,w)=>{
-    const k=w.trim().toLowerCase();
-    if(SOUND_OK[k]) return SOUND_OK[k];
-    if(/^(smiles?|grins?|winks?|nods?|pauses?|shrugs?|smiling|thinking|whispers?|clears throat|coughs?|snorts?)$/.test(k)) return '';
-    return m;   // 正常的括号内容（如补充说明）保留
-  });
+  return stripParentheticals(t,true);
 }
 function enqueueSpeech(text){
   /* Jake 在要求跟读的回合末尾埋 [echo: 目标句]，读出来之前剥掉并记下目标 */
@@ -1054,15 +1055,20 @@ async function handleUserSpeech(text,displayText){
     if(history.length>40) history.splice(1,2);
     const full=await chatStream(history, s=>enqueueSpeech(s));
     genDone=true;
-    if(full){history.push({role:'assistant',content:full});
+    if(full){history.push({role:'assistant',content:cleanForHistory(full)});
       addLine('assistant',cleanForDisplay(full));}
     pumpQueue();
   }catch(err){ genDone=true; setHalo(''); setStatus('出了点状况：'+err.message+'<br>直接继续说即可'); startListening(); }
 }
 function cleanForDisplay(t){
-  return t.replace(/\[\s*echo\s*:[^\]]*\]/ig,'')
-          .replace(/\(\s*(laughs?|laughing|chuckles?|chuckling|giggles?|sighs?|sighing|breath|emm|smiles?|grins?|winks?|nods?|pauses?|shrugs?|whispers?|clears throat|coughs?)\s*\)/ig,'')
+  return stripParentheticals(t,false)
+          .replace(/\[\s*echo\s*:[^\]]*\]/ig,'')
           .replace(/\s{2,}/g,' ').trim();
+}
+function cleanForHistory(t){
+  return stripParentheticals(t,true)
+          .replace(/\[\s*echo\s*:[^\]]*\]/ig,'')
+          .trim();
 }
 function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function renderGems(t){
@@ -1191,7 +1197,7 @@ async function startCall(){
     genDone=false; curEmotion=''; replySeg=0; gapFills=0;
     const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（MiniMax对话接口）');
     genDone=true;
-    if(opening){history.push({role:'assistant',content:opening}); addLine('assistant',cleanForDisplay(opening));}
+    if(opening){history.push({role:'assistant',content:cleanForHistory(opening)}); addLine('assistant',cleanForDisplay(opening));}
     pumpQueue();
   }catch(err){
     setStatus('⚠️ 通讯建立失败：'+err.message+'<br><span style="font-size:11px;opacity:.8">把这行字发给开发者即可定位</span>');
