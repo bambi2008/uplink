@@ -370,6 +370,7 @@ function settingUsable(k,v){
   const value=cleanToken(v);
   if(!value) return false;
   if(TOKEN_SETTING_KEYS.has(k)) return latinHeaderOk(value)&&!/[\s\u3400-\u9fff]/.test(value)&&!/Failed to fetch|通讯建立失败|连接失败|把这行字发给开发者/.test(value);
+  if(['xf_apikey','xf_ise_key','xf_ise_secret'].includes(k) && value.length<16) return false;
   if(k==='asr_engine') return value==='xf'||value==='db';
   if(k==='mm_pace') return ['fast','normal','calm'].includes(value);
   if(k==='mm_tq') return value==='hd'||value==='turbo';
@@ -584,7 +585,11 @@ $('keySave').onclick=async ()=>{
   const v=cleanToken($('keyInput').value); if(!v){alert('请粘贴 MiniMax API Key');return;}
   const ttsKey=cleanToken($('ttsKeyInput').value);
   const g=cleanToken($('groupInput').value);
-  const bad=[tokenProblem('MiniMax API Key',v), ttsKey?tokenProblem('MiniMax 语音 API Key',ttsKey):'', g?tokenProblem('MiniMax GroupId',g):''].filter(Boolean);
+  const xfKey=cleanToken($('xfApikey').value), xfIseKey=cleanToken($('xfIseKey').value), xfIseSecret=cleanToken($('xfIseSecret').value);
+  const bad=[tokenProblem('MiniMax API Key',v), ttsKey?tokenProblem('MiniMax 语音 API Key',ttsKey):'', g?tokenProblem('MiniMax GroupId',g):'',
+    xfKey&&!settingUsable('xf_apikey',xfKey)?'讯飞 APIKey 不完整，请复制实时语音转写服务页里的完整 APIKey':'',
+    xfIseKey&&!settingUsable('xf_ise_key',xfIseKey)?'讯飞评测 APIKey 不完整，请复制完整值':'',
+    xfIseSecret&&!settingUsable('xf_ise_secret',xfIseSecret)?'讯飞评测 APISecret 不完整，请复制完整值':''].filter(Boolean);
   if(bad.length){ alert(bad.join('\n')); return; }
   sSet('mm_key',v); sSet('mm_tts_key',ttsKey); sSet('mm_group',g);
   sSet('xf_appid',cleanToken($('xfAppid').value)); sSet('xf_apikey',cleanToken($('xfApikey').value));
@@ -794,7 +799,8 @@ function connectASR(){
   const pref=sGet('asr_engine')||'xf';
   if(!engQ||!engQ.length){
     engQ=[];
-    const has={db:!!(sGet('db_appid')&&sGet('db_token')), xf:!!(sGet('xf_appid')&&sGet('xf_apikey'))};
+    const has={db:!!(sGet('db_appid')&&sGet('db_token')),
+      xf:settingUsable('xf_appid',sGet('xf_appid'))&&settingUsable('xf_apikey',sGet('xf_apikey'))};
     [pref, pref==='db'?'xf':'db'].forEach(e=>{ if(has[e]) engQ.push(e); });
     if(!engQ.length){ startFallbackASR('豆包和讯飞的凭据都未填写'); return; }
   }

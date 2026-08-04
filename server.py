@@ -81,16 +81,24 @@ def group_from(req):
     return _read_local_settings().get("mm_group", "") or req.headers.get("X-MM-Group") or ENV_GROUP
 
 
+def xf_credentials(req):
+    saved = _read_local_settings()
+    appid = saved.get("xf_appid") or req.query.get("appid") or ENV_XF_APPID
+    apikey = saved.get("xf_apikey") or req.query.get("apikey") or ENV_XF_APIKEY
+    return appid, apikey
+
+
 def xf_handshake_url(appid, apikey):
     """按讯飞规范生成带鉴权的握手 URL：signa = base64(HmacSHA1(MD5(appid+ts), apikey))"""
     ts = str(int(time.time()))
     base = (appid + ts).encode("utf-8")
     md5 = hashlib.md5(base).hexdigest().encode("utf-8")
     signa = base64.b64encode(hmac.new(apikey.encode("utf-8"), md5, hashlib.sha1).digest()).decode("utf-8")
-    from urllib.parse import quote
+    from urllib.parse import urlencode
     # lang=cn 即"中英混合识别"（标准版合法值）；engLangType=1 自动中英文模式
-    return (f"wss://{XF_RTASR_HOST}/v1/ws?appid={appid}&ts={ts}"
-            f"&signa={quote(signa)}&lang=cn&engLangType=1")
+    query = urlencode({"appid": appid, "ts": ts, "signa": signa,
+                       "lang": "cn", "engLangType": 1})
+    return f"wss://{XF_RTASR_HOST}/v1/ws?{query}"
 
 
 # ----------------------------------------------------------------- 静态页
@@ -133,6 +141,8 @@ def _setting_usable(key, value):
             return False
         if any(marker in value for marker in ("Failed to fetch", "通讯建立失败", "连接失败", "把这行字发给开发者")):
             return False
+    if key in {"xf_apikey", "xf_ise_key", "xf_ise_secret"} and len(value) < 16:
+        return False
     if key == "asr_engine" and value not in {"xf", "db"}:
         return False
     if key == "mm_pace" and value not in {"fast", "normal", "calm"}:
@@ -318,10 +328,13 @@ async def ws_asr(req):
     ws_client = web.WebSocketResponse(heartbeat=20)
     await ws_client.prepare(req)
 
-    appid = req.query.get("appid") or ENV_XF_APPID
-    apikey = req.query.get("apikey") or ENV_XF_APIKEY
+    appid, apikey = xf_credentials(req)
     if not appid or not apikey:
         await ws_client.send_json({"type": "error", "msg": "缺少讯飞 APPID / APIKey"})
+        await ws_client.close()
+        return ws_client
+    if len(apikey) < 16:
+        await ws_client.send_json({"type": "error", "msg": "讯飞 APIKey 格式异常：当前不是完整的实时语音转写 APIKey，请从同一应用的服务页重新复制"})
         await ws_client.close()
         return ws_client
 
@@ -772,9 +785,12 @@ async def api_asr_test(req):
             if not ok_any:
                 out["detail"] += "\n两个版本都被拒 → 请到火山控制台确认：1)「流式语音识别大模型」已开通/已领免费额度 2)Access Token 完整无空格 3)App ID 与 Token 属同一应用"
         else:
-            appid = req.query.get("appid", ""); apikey = req.query.get("apikey", "")
+            appid, apikey = xf_credentials(req)
             if not appid or not apikey:
                 out["detail"] = "APPID 或 APIKey 为空"
+                return web.json_response(out)
+            if len(apikey) < 16:
+                out["detail"] = "APIKey 格式异常：当前不是完整的实时语音转写 APIKey，请从同一应用的服务页重新复制"
                 return web.json_response(out)
             try:
                 ws = await session.ws_connect(xf_handshake_url(appid, apikey), timeout=15)
