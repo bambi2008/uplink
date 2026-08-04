@@ -362,6 +362,7 @@ function tokenProblem(label,v){
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
 const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
+let settingsReady=null;
 function settingUsable(k,v){
   const value=cleanToken(v);
   if(!value) return false;
@@ -393,6 +394,10 @@ async function restoreLocalSettings(){
     });
     if(restored) setStatus('已从本机私有设置恢复通讯密钥。');
   }catch(e){}
+}
+function ensureLocalSettings(){
+  if(!settingsReady) settingsReady=restoreLocalSettings();
+  return settingsReady;
 }
 function localServerHint(){
   const here=location.origin&&location.origin!=='null'?location.origin:'file://';
@@ -534,7 +539,7 @@ const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
 /* ---------- 设置弹窗 ---------- */
 $('btnKey').onclick=async ()=>{
-  await restoreLocalSettings();
+  await ensureLocalSettings();
   $('keyInput').value=sGet('mm_key'); $('groupInput').value=sGet('mm_group');
   $('xfAppid').value=sGet('xf_appid'); $('xfApikey').value=sGet('xf_apikey');
   $('dbAppid').value=sGet('db_appid'); $('dbToken').value=sGet('db_token');
@@ -566,7 +571,7 @@ function renderVoices(){
     }catch(err){alert('试听失败：'+err.message);b.textContent=old;b.disabled=false}
   };
 }
-$('keySave').onclick=()=>{
+$('keySave').onclick=async ()=>{
   const v=cleanToken($('keyInput').value); if(!v){alert('请粘贴 MiniMax API Key');return;}
   const g=cleanToken($('groupInput').value);
   const bad=[tokenProblem('MiniMax API Key',v), g?tokenProblem('MiniMax GroupId',g):''].filter(Boolean);
@@ -580,7 +585,7 @@ $('keySave').onclick=()=>{
   const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
   const tq=document.querySelector('input[name=tqMode]:checked'); sSet('mm_tq',tq?tq.value:'hd');
   const voice=document.querySelector('input[name=voicePick]:checked'); if(voice)sSet('mm_voice',voice.value);
-  saveLocalSettings();
+  await saveLocalSettings();
   $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 已同步到本机私有设置，可以打电话了。');
 };
 
@@ -1130,6 +1135,7 @@ function withTimeout(promise,ms,name){
 
 async function startCall(){
   if(active||$('btnStart').disabled) return;   // 防重复触发
+  await ensureLocalSettings();
   if(!sGet('mm_key')){ $('keyOverlay').style.display='flex'; return; }
   try{ validateKeysForCall(); }catch(e){ setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
@@ -1332,7 +1338,7 @@ function mdToHtml(md){return md.replace(/&/g,'&amp;').replace(/</g,'&lt;')
       fl.style.transform='rotate('+(p*260)+'deg)';fl.style.opacity=(0.5*Math.sin(p*Math.PI)).toFixed(2);
       requestAnimationFrame(step);})();})();
 })();
-restoreLocalSettings();
+ensureLocalSettings();
 renderPrepCard();
 </script>
 </body>
