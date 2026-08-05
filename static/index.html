@@ -438,6 +438,7 @@ async function asrTest(){
   }catch(e){ out.style.color='var(--amber)'; out.textContent='❌ 联系不上本地服务器：'+e+'\n黑色命令行窗口是不是关了？重新双击启动脚本。'; }
 }
 function paceMs(){return {fast:450,normal:600,calm:1000}[sGet('mm_pace')||'normal']||600}
+function pauseGraceMs(){return {fast:650,normal:950,calm:1450}[sGet('mm_pace')||'normal']||950}
 function seaTick(){$('seaTime').textContent=new Date().toLocaleTimeString('en-US',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit'})}
 seaTick();setInterval(seaTick,30000);
 const setStatus=t=>$('status').innerHTML=t;
@@ -543,7 +544,7 @@ let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     audioQueue=[], playing=false, curAudio=null, genDone=true, interrupted=false,
     asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
-let callAbort=null, fillGeneration=0;
+let callAbort=null, fillGeneration=0, interruptVersion=0;
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
 /* ---------- 设置弹窗 ---------- */
@@ -624,6 +625,7 @@ async function tts(text, vid, emotion, modelOverride){
   return await r.blob();
 }
 async function chatStream(messages, onSentence){
+  const streamVersion=interruptVersion;
   const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages})};
   if(callAbort) options.signal=callAbort.signal;
   const r=await fetchLocal('/api/chat',options, 'MiniMax 对话接口');
@@ -641,11 +643,12 @@ async function chatStream(messages, onSentence){
   }
   while(true){
     const {done,value}=await reader.read(); if(done)break;
+    if(interrupted||streamVersion!==interruptVersion){try{reader.cancel()}catch{};break;}
     const chunk=dec.decode(value,{stream:true});
     if(chunk.includes('[[ERROR]]')) throw new Error(chunk.split('[[ERROR]]')[1]||'服务出错');
     absorb(chunk);
-    if(interrupted){try{reader.cancel()}catch{};break;}
   }
+  if(streamVersion!==interruptVersion)return '';
   if(emoBuf.trim()&&!interrupted){pending+=emoBuf;full+=emoBuf;}
   if(pending.trim()&&!interrupted)onSentence(pending.trim());
   return full.trim();
@@ -708,19 +711,22 @@ function playFiller(){
 }
 let gapFills=0;
 async function pumpQueue(){
-  if(playing)return; playing=true; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（点头像可打断）'); phase='speaking';
-  earDiag('Jake 正在说 · 现在不会收音；要插话请点头像打断');
-  while(audioQueue.length&&!interrupted){
+  if(playing)return;
+  const playbackVersion=interruptVersion;
+  playing=true; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）'); phase='speaking';
+  earDiag('Jake 正在说 · 耳朵保持待命，你开口他会停下');
+  while(audioQueue.length&&!interrupted&&playbackVersion===interruptVersion){
     const blob=await audioQueue.shift(); if(!blob||interrupted)continue;
     await playBlob(blob);
   }
   playing=false;
+  if(playbackVersion!==interruptVersion)return;
   if(genDone&&!audioQueue.length&&active&&!interrupted){ startListening(); return; }
   /* 队列空了但大脑还在生成 → 别冷场，隔一拍轻轻"嗯…"一声填住（每条回复最多补2次） */
   if(!genDone&&active&&!interrupted&&gapFills<2){
     gapFills++;
     setTimeout(()=>{
-      if(!genDone&&active&&!interrupted&&!playing&&!audioQueue.length&&fillerBlobs.length){
+      if(playbackVersion===interruptVersion&&!genDone&&active&&!interrupted&&!playing&&!audioQueue.length&&fillerBlobs.length){
         let i; do{ i=Math.floor(Math.random()*fillerBlobs.length); }while(fillerBlobs.length>1&&i===lastFiller);
         lastFiller=i; audioQueue.push(Promise.resolve(fillerBlobs[i])); pumpQueue();
       }
@@ -737,7 +743,7 @@ function playBlob(blob){
     let done=false, unlockHandler=null;
     const finish=()=>{
       if(done)return;
-      done=true; audioUnlocked=true; URL.revokeObjectURL(url);
+      done=true; audioUnlocked=true; speakingStartedAt=0; bargeFrames=0; bargePreRoll=[]; URL.revokeObjectURL(url);
       if(unlockHandler){document.removeEventListener('pointerdown',unlockHandler);unlockHandler=null;}
       if(curAudio===audio)curAudio=null;
       if(stopCurrentAudio===finish)stopCurrentAudio=()=>{};
@@ -746,28 +752,73 @@ function playBlob(blob){
     stopCurrentAudio=finish; curAudio=audio;
     audio.onended=finish;
     audio.onerror=()=>{ setStatus('⚠️ 音频播放出错（设备/驱动问题）'); finish(); };
-    audio.play().then(()=>{audioUnlocked=true;}).catch(err=>{
+    audio.play().then(()=>{audioUnlocked=true;speakingStartedAt=Date.now();bargeNoiseFloor=Math.max(micNoiseFloor,0.003);}).catch(err=>{
       if(!audioUnlocked){
         setStatus('🔊 浏览器拦了声音 · <b>请点击页面任意位置解锁</b>');
         unlockHandler=()=>{
           unlockHandler=null;
-          audio.play().then(()=>{audioUnlocked=true;setStatus('TRANSMISSION · Jake 正在说…');}).catch(finish); };
+          audio.play().then(()=>{audioUnlocked=true;speakingStartedAt=Date.now();bargeNoiseFloor=Math.max(micNoiseFloor,0.003);setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）');}).catch(finish); };
         document.addEventListener('pointerdown',unlockHandler);
       } else { finish(); }
     });
   });
 }
-$('haloWrap').onclick=()=>{
-  if(phase!=='speaking')return;
-  interrupted=true; const audio=curAudio; stopCurrentAudio(); if(audio){try{audio.pause()}catch{}} audioQueue=[]; playing=false;
-  history.push({role:'user',content:'(The learner interrupted you mid-sentence — let them speak.)'});
-  startListening();
-};
+function interruptJakeForUser(source,preRoll){
+  if(phase!=='speaking'&&phase!=='thinking')return false;
+  interruptVersion++; interrupted=true;
+  const audio=curAudio; stopCurrentAudio(); if(audio){try{audio.pause()}catch{}}
+  audioQueue=[]; playing=false; genDone=true;
+  history.push({role:'user',content:source==='voice'
+    ?'(The learner continued the same thought before you finished — stop immediately and let them complete it.)'
+    :'(The learner interrupted you mid-sentence — let them speak.)'});
+  pendingPreRoll=Array.isArray(preRoll)?preRoll.slice():[];
+  startListening(true);
+  flushPendingPreRoll();
+  if(source==='voice'){
+    setStatus('听到你继续说了 · Jake 已停下，等你说完');
+    earDiag('麦克风 · 已自动把话筒还给你');
+  }
+  return true;
+}
+$('haloWrap').onclick=()=>interruptJakeForUser('manual',[]);
 
 /* ---------- 麦克风 → 后端 WebSocket 识别 ---------- */
 let micPipeOk=false;   // WebAudio采集管线是否可用（不可用则必须走备用识别）
 let micWatch=null, micSilenceTimer=null, micLastVoice=0, asrLastText=0, micLevel=0, micFrames=0, listenStartedAt=0, noTextPromptAt=0, turnClosing=false, asrRestarting=false, micNoiseFloor=0.003, micSpeechStarted=false;
+let turnCommitTimer=null, turnCommitSent=false, thinkingStartedAt=0;
+let speakingStartedAt=0, bargeFrames=0, bargePreRoll=[], bargeNoiseFloor=0.003, pendingPreRoll=[];
 function earDiag(t){ const e=$('earDiag'); if(e)e.innerHTML=t||''; }
+function keepPreRoll(i16,limit){
+  pendingPreRoll.push(i16.slice());
+  while(pendingPreRoll.length>(limit||6))pendingPreRoll.shift();
+}
+function flushPendingPreRoll(){
+  if(!pendingPreRoll.length||usingFallback||phase!=='listening'||!asrAcceptingAudio||!asrWS||asrWS.readyState!==1)return;
+  const chunks=pendingPreRoll.splice(0);
+  for(const chunk of chunks){try{asrWS.send(chunk.buffer)}catch(e){pendingPreRoll=[];break;}}
+}
+function monitorUserTakeover(i16,level,listeningThreshold){
+  const now=Date.now(), duringThinking=phase==='thinking'&&now-thinkingStartedAt>250;
+  const duringSpeech=phase==='speaking'&&playing&&curAudio&&!curAudio.paused&&speakingStartedAt>0;
+  if(!duringThinking&&!duringSpeech){bargeFrames=0;bargePreRoll=[];return;}
+  if(duringSpeech&&now-speakingStartedAt<450){
+    bargeNoiseFloor=bargeNoiseFloor*.75+level*.25; bargeFrames=0; bargePreRoll=[]; return;
+  }
+  const threshold=duringSpeech
+    ?Math.max(0.014,bargeNoiseFloor*2.4,micNoiseFloor*4,listeningThreshold*1.35)
+    :Math.max(0.012,micNoiseFloor*3.5,listeningThreshold*1.2);
+  if(level>threshold){
+    bargeFrames++; bargePreRoll.push(i16.slice());
+    while(bargePreRoll.length>3)bargePreRoll.shift();
+    if(bargeFrames>=2){
+      const pre=bargePreRoll.slice(); bargeFrames=0; bargePreRoll=[];
+      interruptJakeForUser('voice',pre);
+    }
+  }else{
+    if(duringSpeech)bargeNoiseFloor=bargeNoiseFloor*.97+level*.03;
+    bargeFrames=0; bargePreRoll=[];
+  }
+}
 async function openMic(){
   micPipeOk=false;
   try{
@@ -783,24 +834,31 @@ async function openMic(){
     micSink=audioCtx.createGain(); micSink.gain.value=0;
     micSource.connect(micNode); micNode.connect(micSink); micSink.connect(audioCtx.destination);
     micNode.onaudioprocess=e=>{
-      if(phase!=='listening'||turnClosing) return;
+      if(!active||(phase!=='listening'&&phase!=='thinking'&&phase!=='speaking')) return;
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
       let sum=0;
       for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));sum+=s*s;i16[i]=s<0?s*32768:s*32767;}
-      micLevel=Math.sqrt(sum/f32.length); micFrames++;
+      micLevel=Math.sqrt(sum/f32.length);
+      const voiceThreshold=Math.max(0.01,micNoiseFloor*3);
+      if(phase==='thinking'||phase==='speaking'){
+        monitorUserTakeover(i16,micLevel,voiceThreshold);
+        return;
+      }
+      micFrames++;
       if(!micSpeechStarted&&Date.now()-listenStartedAt<800&&micLevel<0.02){
         micNoiseFloor=micNoiseFloor*.8+micLevel*.2;
       }
-      const voiceThreshold=Math.max(0.01,micNoiseFloor*3);
       if(micLevel>voiceThreshold){
+        if(turnClosing&&!turnCommitSent)resumeAudioTurn();
         micLastVoice=Date.now();
         micSpeechStarted=true;
         armMicSilence();
       }
       /* 跟读评测旁路：Jake 要求跟读时，这轮音频留一份（上限30秒），说完送去发音评测 */
       if(pendingEcho&&echoChunks.reduce((n,c)=>n+c.length,0)<16000*30) echoChunks.push(i16);
-      if(asrWS&&asrWS.readyState===1){ try{ asrWS.send(i16.buffer); }catch(e){} }
+      if(asrAcceptingAudio&&asrWS&&asrWS.readyState===1){ flushPendingPreRoll(); try{ asrWS.send(i16.buffer); }catch(e){} }
+      else if(!usingFallback){keepPreRoll(i16,6);}
     };
     micPipeOk=true; earDiag('麦克风 · 已授权，等待你说话');
   }catch(e){
@@ -811,7 +869,7 @@ async function openMic(){
     earDiag('麦克风 · 未建立音频管线，准备使用浏览器备用识别');
   }
 }
-let asrOk=false, asrTries=0, usingFallback=false;
+let asrOk=false, asrTries=0, asrAcceptingAudio=false, usingFallback=false;
 let pendingEcho=null, echoChunks=[], engQ=null, asrGeneration=0, engineFailing=false;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
 function failEngine(reason,failedWS){
   /* 当前引擎连不上：切队列里下一家（豆包↔讯飞热备份），都没了才退浏览器备用 */
@@ -820,7 +878,7 @@ function failEngine(reason,failedWS){
   engineFailing=true;
   const dead=engQ&&engQ.shift();
   console.warn('识别引擎失效:',dead,reason);
-  asrOk=false; asrTries=0;
+  asrOk=false; asrAcceptingAudio=false; asrTries=0;
   const old=asrWS; asrWS=null;
   if(old){ old.onclose=null; old.onerror=null; try{old.close();}catch{} }
   earDiag('识别 · '+reason);
@@ -856,10 +914,11 @@ function connectASR(){
   ws.onmessage=ev=>{
     if(generation!==asrGeneration||ws!==asrWS)return;
     let d; try{d=JSON.parse(ev.data)}catch{return;}
-    if(d.type==='ready'){ asrOk=true; asrTries=0;
+    if(d.type==='ready'){ asrOk=true; asrAcceptingAudio=true; asrTries=0;
       const pref=sGet('asr_engine')||'xf';
       $('conn').innerHTML='识别连接 <b>已就绪</b>（'+(engine==='db'?'豆包':'讯飞')+(engine!==pref?' · 热备援':'')+'）';
-      earDiag(phase==='listening'?'现在轮到你说 · 中文英文都可以':'耳朵 · 已接通，等 Jake 说完才开始听你'); return; }
+      if(phase==='listening')flushPendingPreRoll();
+      earDiag(phase==='listening'?'现在轮到你说 · 中文英文都可以':'耳朵 · 已接通，Jake 说话时也会留意你是否继续说'); return; }
     if(d.type==='debug'){ earDiag('诊断 · '+d.msg); return; }
     if(d.type==='error'){ failEngine((engine==='db'?'豆包':'讯飞')+'后端报错：'+(d.msg||'未知'),ws); return; }
     if(d.type==='asr' && phase==='listening'){
@@ -871,6 +930,7 @@ function connectASR(){
   };
   ws.onclose=()=>{
     if(generation!==asrGeneration||ws!==asrWS||engineFailing)return;
+    asrAcceptingAudio=false;
     if(!active||usingFallback||turnClosing) return;
     asrTries++;
     if(asrOk && asrTries<4){ $('conn').innerHTML='识别连接 · 重连中…'; setTimeout(connectASR,800); }
@@ -893,21 +953,39 @@ function restartASR(reason){
 
 function armMicSilence(){
   clearTimeout(micSilenceTimer);
-  micSilenceTimer=setTimeout(closeAudioTurn, Math.max(900, paceMs()));
+  micSilenceTimer=setTimeout(closeAudioTurn, Math.max(650, paceMs()));
 }
 
 function closeAudioTurn(){
   if(turnClosing||phase!=='listening') return;
-  turnClosing=true;
-  earDiag('麦克风 · 已听到停顿，正在结算这一句…');
+  turnClosing=true; turnCommitSent=false;
+  clearTimeout(turnCommitTimer);
+  earDiag('麦克风 · 听到停顿，再等你一拍…');
+  setStatus('Jake 在等你把这句话说完…');
+  turnCommitTimer=setTimeout(commitAudioTurn,pauseGraceMs());
+}
+
+function resumeAudioTurn(){
+  if(!turnClosing||turnCommitSent||phase!=='listening')return;
+  clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false;
+  earDiag('麦克风 · 听到你继续说，保持聆听');
+  setStatus('你还在说 · Jake 继续等');
+}
+
+function commitAudioTurn(){
+  if(!turnClosing||phase!=='listening')return;
+  turnCommitSent=true;
+  earDiag('麦克风 · 停顿确认，正在结算这一句…');
   if(usingFallback) fbStop();
-  try{ if(asrWS&&asrWS.readyState===1) asrWS.send('stop'); }catch{}
-  setTimeout(()=>finishTurn(true),2200);
+  try{ if(asrWS&&asrWS.readyState===1){asrAcceptingAudio=false;asrWS.send('stop');} }catch{}
+  clearTimeout(turnCommitTimer);
+  const flushWait=(finals.trim()||lastPartial.trim())?500:1400;
+  turnCommitTimer=setTimeout(()=>{turnCommitTimer=null;finishTurn(true);},flushWait);
 }
 
 function startMicWatch(){
-  clearInterval(micWatch); clearTimeout(micSilenceTimer);
-  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); noTextPromptAt=0; turnClosing=false; asrRestarting=false; micNoiseFloor=0.003; micSpeechStarted=false;
+  clearInterval(micWatch); clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null;
+  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); noTextPromptAt=0; turnClosing=false; turnCommitSent=false; asrRestarting=false; micNoiseFloor=0.003; micSpeechStarted=false;
   earDiag('现在轮到你说 · 中文英文都可以');
   micWatch=setInterval(()=>{
     if(!active||phase!=='listening'||usingFallback||turnClosing) return;
@@ -939,13 +1017,12 @@ let fbRec=null, fbActive=false, fbLang='zh-CN', fbWatch=null;
 
 function startFallbackASR(reason){
   if(usingFallback) return;
-  usingFallback=true;
+  usingFallback=true; asrAcceptingAudio=false;
   if(reason){ console.warn('退回备用识别，原因：', reason);
     setStatus('⚠ 后端识别没接上，已临时用浏览器识别。<br><span style="font-size:11px;color:var(--amber)">原因：'+reason+'</span>'); }
   try{if(asrWS){asrWS.onclose=null;asrWS.close();asrWS=null;}}catch{}
-  try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;micNode=null;}}catch{}
-  try{if(audioCtx){audioCtx.close();audioCtx=null;}}catch{}
-  try{if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}}catch{}
+  /* 保留已授权的 WebAudio 管线，只做本地音量判断；备用识别仍负责转文字。 */
+  pendingPreRoll=[];
   $('conn').innerHTML='识别 · <b style="color:var(--amber)">浏览器备用模式</b>'
     +(reason?'<div style="font-size:10.5px;color:var(--amber);opacity:.85;line-height:1.5;max-width:340px;margin-top:2px">原因：'+reason+'</div>':'');
   if(reason) $('conn').title=reason;
@@ -969,12 +1046,14 @@ function fbStart(){
   fbRec.onresult=e=>{
     if(phase!=='listening') return;
     asrLastText=Date.now(); earDiag('耳朵 · 浏览器识别到文字');
+    const previous=lastPartial.trim();
     let interim='';
     for(let i=e.resultIndex;i<e.results.length;i++){
       if(e.results[i].isFinal){ finals+=e.results[i][0].transcript+' '; }
       else interim+=e.results[i][0].transcript;
     }
     const live=(finals+interim).trim();
+    if(live&&live!==previous&&turnClosing&&!turnCommitSent)resumeAudioTurn();
     if(live) showPartial(live);
     if(live) armSilence();
   };
@@ -1001,16 +1080,16 @@ function showPartial(t){
 }
 function armSilence(ms){
   clearTimeout(silenceTimer);
-  silenceTimer=setTimeout(()=>{ if(phase==='listening') closeAudioTurn(); },Math.max(900,ms||paceMs()));
+  silenceTimer=setTimeout(()=>{ if(phase==='listening') closeAudioTurn(); },Math.max(650,ms||paceMs()));
 }
 function listenAgain(msg){
-  clearTimeout(micSilenceTimer); turnClosing=false;
+  clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false; turnCommitSent=false;
   pendingEcho=null; echoChunks=[]; finals=''; lastPartial=''; showPartial('');
   if(active){ setStatus(msg||'这句没听清，再说一遍就行。'); startListening(); }
 }
 async function finishTurn(force=false){
   if(phase!=='listening'||(turnClosing&&!force))return;
-  clearTimeout(micSilenceTimer); turnClosing=false;
+  clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false; turnCommitSent=false;
   /* 关键：说完这轮，取"屏幕上实际显示的完整文字"。
      浏览器识别中文常只给临时结果、迟迟不定稿，若只读 finals 会拿到空串 → Jake 收不到你的话。
      finals 是已定稿部分，lastPartial 是含临时结果的完整显示；谁更全用谁。 */
@@ -1079,25 +1158,33 @@ function addScore(text){
   d.textContent=text;
   const log=$('log'); log.appendChild(d); log.scrollTop=log.scrollHeight;
 }
-function startListening(){ if(!active)return; interrupted=false; finals=''; lastPartial=''; echoChunks=[]; clearTimeout(silenceTimer);
+function startListening(preservePreRoll){ if(!active)return; interrupted=false; finals=''; lastPartial=''; echoChunks=[]; clearTimeout(silenceTimer);
+  if(!preservePreRoll)pendingPreRoll=[];
+  thinkingStartedAt=0; speakingStartedAt=0; bargeFrames=0; bargePreRoll=[];
   phase='listening'; setHalo('listening');
   startMicWatch();
   if(usingFallback) fbStart();   // 备用模式：轮到你了才开耳朵
+  else if(!asrWS||asrWS.readyState>1||(asrWS.readyState===1&&!asrAcceptingAudio)){
+    try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{} asrWS=null; asrOk=false;
+    setTimeout(()=>{if(active&&!usingFallback&&phase==='listening')connectASR();},0);
+  }
   setStatus('到你了 · 英语中文随便说，停顿约 '+(paceMs()/1000).toFixed(1).replace('.0','')+' 秒就轮到他'); }
 
 async function handleUserSpeech(text,displayText){
   addLine('user',displayText||text);
-  phase='thinking'; setHalo('thinking'); setStatus('Jake 在想…'); interrupted=false; genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+  phase='thinking'; thinkingStartedAt=Date.now(); setHalo('thinking'); setStatus('Jake 在想…'); interrupted=false; genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+  const replyVersion=interruptVersion;
   playFiller();
   try{
     history.push({role:'user',content:text});
     if(history.length>40) history.splice(1,2);
     const full=await chatStream(history, s=>enqueueSpeech(s));
+    if(replyVersion!==interruptVersion)return;
     genDone=true;
     if(full){history.push({role:'assistant',content:cleanForHistory(full)});
       addLine('assistant',cleanForDisplay(full));}
     pumpQueue();
-  }catch(err){ genDone=true; setHalo(''); setStatus('出了点状况：'+err.message+'<br>直接继续说即可'); startListening(); }
+  }catch(err){ if(replyVersion!==interruptVersion)return; genDone=true; setHalo(''); setStatus('出了点状况：'+err.message+'<br>直接继续说即可'); startListening(); }
 }
 function cleanForDisplay(t){
   return stripParentheticals(t,false)
@@ -1232,10 +1319,12 @@ async function startCall(){
 
     /* 第4步：唤醒 Jake（对 MiniMax 的首次调用，限时40秒） */
     step(4,'呼叫地面控制 · 唤醒 Jake…（最多40秒）');
-    setHalo('thinking'); phase='thinking';
+    setHalo('thinking'); phase='thinking'; thinkingStartedAt=Date.now();
     history.push({role:'user',content:'(The call just connected. Open with ONE short warm Chinese greeting like "哎，接通啦！最近咋样啊？" then glide into English small talk. Emotion tag first.)'});
     genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+    const openingVersion=interruptVersion;
     const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（MiniMax对话接口）');
+    if(openingVersion!==interruptVersion)return;
     genDone=true;
     if(opening){history.push({role:'assistant',content:cleanForHistory(opening)}); addLine('assistant',cleanForDisplay(opening));}
     pumpQueue();
@@ -1256,7 +1345,7 @@ function startTimer(){
   },1000);
 }
 function cleanup(){
-  fillGeneration++;
+  fillGeneration++; interruptVersion++;
   if(callAbort){try{callAbort.abort();}catch{} callAbort=null;}
   const oldAudio=curAudio; stopCurrentAudio(); if(oldAudio){try{oldAudio.pause();}catch{}}
   try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
@@ -1266,11 +1355,11 @@ function cleanup(){
   try{if(micStream)micStream.getTracks().forEach(t=>t.stop())}catch{}
   try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{}
   try{if(fbRec){fbRec.onend=null;fbRec.abort();}}catch{}
-  clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer);
-  turnClosing=false;
+  clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null;
+  turnClosing=false; turnCommitSent=false; pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0; speakingStartedAt=0; thinkingStartedAt=0;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
   ackBlobs=[]; fillerBlobs=[]; lastFiller=-1; lastAck=-1;
-  fbLang='zh-CN'; asrOk=false; asrTries=0; earDiag('');
+  fbLang='zh-CN'; asrOk=false; asrAcceptingAudio=false; asrTries=0; earDiag('');
 }
 async function endCall(showReport){
   if(!active)return;
