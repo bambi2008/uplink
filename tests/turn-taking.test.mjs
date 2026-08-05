@@ -103,6 +103,28 @@ function testInterruptInvalidatesOldWork(){
   assert.equal(stopped,1); assert.equal(started,1); assert.equal(flushed,1);
 }
 
+function testLiveCoachingPromptIsEphemeral(){
+  const ctx=makeContext();
+  vm.runInContext(section('const LIVE_COACHING_REMINDER','async function handleUserSpeech'),ctx);
+  const original=[
+    {role:'system',content:'Jake persona'},
+    {role:'assistant',content:'How was your weekend?'},
+    {role:'user',content:'Yesterday I go to the market.'},
+  ];
+  const coached=ctx.withLiveCoaching(original);
+
+  assert.notEqual(coached,original);
+  assert.equal(coached.length,original.length);
+  assert.equal(original[0].content,'Jake persona');
+  assert.match(coached[0].content,/TURN-SPECIFIC LIVE COACHING PRIORITY/);
+  assert.match(coached[0].content,/begin with ONE brief spoken correction/);
+  assert.equal(coached.at(-1).role,'user');
+  assert.equal(coached.at(-1).content,original.at(-1).content);
+
+  const handler=section('async function handleUserSpeech','function cleanForDisplay');
+  assert.match(handler,/chatStream\(withLiveCoaching\(history\)/);
+}
+
 async function testStaleStreamCannotQueueSpeech(){
   let emitted=0, cancelled=false;
   const ctx=makeContext({
@@ -148,6 +170,7 @@ async function testStalePlaybackCannotReopenMic(){
 testPauseCanResume();
 testVoiceTakeoverNeedsSustainedSpeech();
 testInterruptInvalidatesOldWork();
+testLiveCoachingPromptIsEphemeral();
 await testStaleStreamCannotQueueSpeech();
 await testStalePlaybackCannotReopenMic();
 
