@@ -369,7 +369,7 @@ function credentialCollision(mm,db){
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
 const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
-let settingsReady=null;
+let settingsReady=null, settingsLoaded=false;
 function settingUsable(k,v){
   const value=cleanToken(v);
   if(!value) return false;
@@ -394,7 +394,7 @@ async function saveLocalSettings(){
 async function restoreLocalSettings(){
   try{
     const r=await fetchLocal('/api/local_settings',null,'本地设置恢复接口');
-    if(!r.ok) return;
+    if(!r.ok) return false;
     const j=await r.json(), settings=j.settings||{};
     let restored=0;
     SETTING_KEYS.forEach(k=>{
@@ -404,10 +404,16 @@ async function restoreLocalSettings(){
       }
     });
     if(restored) setStatus('已从本机私有设置恢复通讯密钥。');
-  }catch(e){}
+    return true;
+  }catch(e){ return false; }
 }
 function ensureLocalSettings(){
-  if(!settingsReady) settingsReady=restoreLocalSettings();
+  if(settingsLoaded) return Promise.resolve(true);
+  if(!settingsReady){
+    settingsReady=restoreLocalSettings()
+      .then(ok=>{settingsLoaded=ok;return ok;})
+      .finally(()=>{settingsReady=null;});
+  }
   return settingsReady;
 }
 function localServerHint(){
@@ -544,12 +550,17 @@ function playWrapPing(){ try{ beep(520,0,0.3,0.05); beep(400,0.32,0.4,0.05); }ca
 
 /* ---------- 状态 ---------- */
 let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
-    active=false, phase='idle', curEmotion='',
+    active=false, starting=false, phase='idle', curEmotion='',
     audioQueue=[], playing=false, playbackOwner=-1, curAudio=null, genDone=true, interrupted=false,
     asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
-let callAbort=null, fillGeneration=0, interruptVersion=0;
+let callAbort=null, fillGeneration=0, interruptVersion=0, callGeneration=0;
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
+
+function callLater(fn,delay){
+  const generation=callGeneration;
+  return setTimeout(()=>{if(generation===callGeneration)fn();},delay);
+}
 
 /* ---------- 设置弹窗 ---------- */
 $('btnKey').onclick=async ()=>{
@@ -726,7 +737,9 @@ async function pumpQueue(){
   playing=true; playbackOwner=playbackVersion; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）'); phase='speaking';
   earDiag('Jake 正在说 · 耳朵保持待命，你开口他会停下');
   while(audioQueue.length&&!interrupted&&playbackVersion===interruptVersion){
-    const blob=await audioQueue.shift(); if(!blob||interrupted)continue;
+    const blob=await audioQueue.shift();
+    if(playbackVersion!==interruptVersion||playbackOwner!==playbackVersion)break;
+    if(!blob||interrupted)continue;
     await playBlob(blob);
   }
   if(playbackOwner!==playbackVersion)return;
@@ -831,20 +844,32 @@ function monitorUserTakeover(i16,level,listeningThreshold){
   }
 }
 async function openMic(){
+  const micGeneration=callGeneration;
   micPipeOk=false;
+  let stream=null,ctx=null,source=null,node=null,sink=null;
+  const release=()=>{
+    try{if(node){node.onaudioprocess=null;node.disconnect();}}catch{}
+    try{if(source)source.disconnect()}catch{}
+    try{if(sink)sink.disconnect()}catch{}
+    try{if(ctx)ctx.close()}catch{}
+    try{if(stream)stream.getTracks().forEach(t=>t.stop())}catch{}
+  };
   try{
-    micStream=await navigator.mediaDevices.getUserMedia({audio:{
+    stream=await navigator.mediaDevices.getUserMedia({audio:{
       channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
     }});
   }catch(e){ /* 没给权限，备用识别会自己再申请 */ }
+  if(micGeneration!==callGeneration){release();return false;}
   try{
-    audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
-    await audioCtx.resume();
-    micSource=audioCtx.createMediaStreamSource(micStream);
-    micNode=audioCtx.createScriptProcessor(4096,1,1);
-    micSink=audioCtx.createGain(); micSink.gain.value=0;
-    micSource.connect(micNode); micNode.connect(micSink); micSink.connect(audioCtx.destination);
-    micNode.onaudioprocess=e=>{
+    if(!stream)throw new Error('microphone unavailable');
+    ctx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+    await ctx.resume();
+    if(micGeneration!==callGeneration){release();return false;}
+    source=ctx.createMediaStreamSource(stream);
+    node=ctx.createScriptProcessor(4096,1,1);
+    sink=ctx.createGain(); sink.gain.value=0;
+    source.connect(node); node.connect(sink); sink.connect(ctx.destination);
+    node.onaudioprocess=e=>{
       if(!active||(phase!=='listening'&&phase!=='thinking'&&phase!=='speaking')) return;
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
@@ -871,13 +896,16 @@ async function openMic(){
       if(asrAcceptingAudio&&asrWS&&asrWS.readyState===1){ flushPendingPreRoll(); try{ asrWS.send(i16.buffer); }catch(e){} }
       else if(!usingFallback){keepPreRoll(i16,6);}
     };
+    micStream=stream; audioCtx=ctx; micSource=source; micNode=node; micSink=sink;
     micPipeOk=true; earDiag('麦克风 · 已授权，等待你说话');
+    return true;
   }catch(e){
-    try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
-    try{if(audioCtx)audioCtx.close();}catch{}
-    try{if(micStream)micStream.getTracks().forEach(t=>t.stop());}catch{}
-    audioCtx=null; micNode=null; micStream=null; micPipeOk=false;
-    earDiag('麦克风 · 未建立音频管线，准备使用浏览器备用识别');
+    release();
+    if(micGeneration===callGeneration){
+      audioCtx=micNode=micSource=micSink=micStream=null; micPipeOk=false;
+      earDiag('麦克风 · 未建立音频管线，准备使用浏览器备用识别');
+    }
+    return false;
   }
 }
 let asrOk=false, asrTries=0, asrAcceptingAudio=false, usingFallback=false;
@@ -897,13 +925,14 @@ function failEngine(reason,failedWS){
   earDiag('识别 · '+reason);
   if(engQ&&engQ.length){
     $('conn').innerHTML='识别 · 切换备用引擎（'+(engQ[0]==='db'?'豆包':'讯飞')+'）…';
-    setTimeout(()=>{engineFailing=false; if(active&&!usingFallback)connectASR();},300);
+    callLater(()=>{engineFailing=false; if(active&&!usingFallback)connectASR();},300);
   } else { engineFailing=false; startFallbackASR(engineFailures.join('；')||reason); }
 }
 function connectASR(){
   /* 采集管线（WebAudio）没建起来，就没法给后端送音频 → 必须走备用识别 */
   if(!micPipeOk){ startFallbackASR('浏览器音频管线未建立（WebAudio 初始化失败）'); return; }
   if(engineFailing)return;
+  if(asrWS&&asrWS.readyState<=1)return;
   const pref=sGet('asr_engine')||'xf';
   if(!engQ||!engQ.length){
     engQ=[]; engineFailures=[];
@@ -946,7 +975,7 @@ function connectASR(){
     asrAcceptingAudio=false;
     if(!active||usingFallback||turnClosing) return;
     asrTries++;
-    if(asrOk && asrTries<4){ $('conn').innerHTML='识别连接 · 重连中…'; setTimeout(connectASR,800); }
+    if(asrOk && asrTries<4){ $('conn').innerHTML='识别连接 · 重连中…'; callLater(connectASR,800); }
     else if(!asrOk){
       failEngine('通道「'+(engine==='db'?'/ws/doubao':'/ws/asr')+'」在就绪前被关闭（server 未重启/路由缺失/后端拒绝）',ws);
     }
@@ -961,7 +990,7 @@ function restartASR(reason){
   $('conn').innerHTML='识别连接 · 正在刷新耳朵…';
   setStatus('我听到麦克风有声音，但识别没出字，正在自动重连。你可以马上再说一遍。');
   try{ if(asrWS){ asrWS.onclose=null; asrWS.close(); asrWS=null; } }catch{}
-  setTimeout(()=>{ asrRestarting=false; if(active&&!usingFallback) connectASR(); },350);
+  callLater(()=>{ asrRestarting=false; if(active&&!usingFallback) connectASR(); },350);
 }
 
 function armMicSilence(){
@@ -1053,10 +1082,12 @@ function startFallbackASR(reason){
 
 function fbStart(){
   if(!usingFallback||!active||fbActive) return;
+  const recognitionGeneration=callGeneration;
   fbActive=true;
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   fbRec=new SR(); fbRec.lang=fbLang; fbRec.continuous=true; fbRec.interimResults=true;
   fbRec.onresult=e=>{
+    if(recognitionGeneration!==callGeneration)return;
     if(phase!=='listening') return;
     asrLastText=Date.now(); earDiag('耳朵 · 浏览器识别到文字');
     const previous=lastPartial.trim();
@@ -1070,15 +1101,18 @@ function fbStart(){
     if(live) showPartial(live);
     if(live) armSilence();
   };
-  fbRec.onend=()=>{ fbActive=false;
-    if(usingFallback&&active&&phase==='listening') setTimeout(fbStart,250); };
-  fbRec.onerror=()=>{ fbActive=false; };
-  try{ fbRec.start(); }catch(e){ fbActive=false; setTimeout(fbStart,500); }
+  fbRec.onend=()=>{
+    if(recognitionGeneration!==callGeneration)return;
+    fbActive=false;
+    if(usingFallback&&active&&phase==='listening') callLater(fbStart,250);
+  };
+  fbRec.onerror=()=>{ if(recognitionGeneration===callGeneration)fbActive=false; };
+  try{ fbRec.start(); }catch(e){ fbActive=false; callLater(fbStart,500); }
 }
 
 function fbStop(){
   fbActive=false;
-  if(fbRec){ try{fbRec.onend=null; fbRec.abort();}catch{} fbRec=null; }
+  if(fbRec){ try{fbRec.onresult=null;fbRec.onerror=null;fbRec.onend=null;fbRec.abort();}catch{} fbRec=null; }
 }
 
 let lastPartial='';   // 屏幕上最新显示的完整识别文字（含未定稿的临时结果）
@@ -1102,6 +1136,7 @@ function listenAgain(msg){
 }
 async function finishTurn(force=false){
   if(phase!=='listening'||(turnClosing&&!force))return;
+  const turnVersion=interruptVersion;
   clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false; turnCommitSent=false;
   /* 关键：说完这轮，取"屏幕上实际显示的完整文字"。
      浏览器识别中文常只给临时结果、迟迟不定稿，若只读 finals 会拿到空串 → Jake 收不到你的话。
@@ -1118,6 +1153,7 @@ async function finishTurn(force=false){
     listenAgain(hint);
     return;
   }
+  phase='processing'; setHalo('thinking'); thinkingStartedAt=Date.now();
   /* 跟读评测：Jake 埋了目标句且这轮录到了足够音频（≥0.4秒），先打分再交给 Jake */
   const phrase=pendingEcho; pendingEcho=null;
   const chunks=echoChunks; echoChunks=[];
@@ -1125,12 +1161,14 @@ async function finishTurn(force=false){
   if(phrase&&nSamples>=6400&&sGet('xf_ise_key')&&sGet('xf_ise_secret')&&sGet('xf_appid')){
     setStatus('SCORING · 正在评测你的发音…');
     const rep=await iseEvaluate(phrase,chunks);
+    if(turnVersion!==interruptVersion||!active)return;
     if(rep){
       addScore(rep.human);
       handleUserSpeech(text+'\n\n'+rep.forJake, text);
       return;
     }
   }
+  if(turnVersion!==interruptVersion||!active)return;
   handleUserSpeech(text);
 }
 function pcmToB64(chunks){
@@ -1141,12 +1179,11 @@ function pcmToB64(chunks){
   return btoa(s);
 }
 async function iseEvaluate(phrase,chunks){
+  const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
   try{
-    const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
     const r=await fetchLocal('/api/ise',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
       body:JSON.stringify({appid:sGet('xf_appid'),apikey:sGet('xf_ise_key'),apisecret:sGet('xf_ise_secret'),
                            text:phrase,pcm:pcmToB64(chunks)})}, '发音评测接口');
-    clearTimeout(t);
     const j=await r.json();
     if(!j.ok){ console.warn('评测失败:',j.detail); addScore('📊 发音评测没成功：'+(j.detail||'未知原因')); return null; }
     /* 给用户看的一行 */
@@ -1162,6 +1199,7 @@ async function iseEvaluate(phrase,chunks){
     forJake+=']';
     return {human,forJake};
   }catch(e){ console.warn('评测异常:',e); return null; }
+  finally{ clearTimeout(t); }
 }
 function addScore(text){
   transcript.push({role:'system',text});
@@ -1179,7 +1217,7 @@ function startListening(preservePreRoll){ if(!active)return; interrupted=false; 
   if(usingFallback) fbStart();   // 备用模式：轮到你了才开耳朵
   else if(!asrWS||asrWS.readyState>1||(asrWS.readyState===1&&!asrAcceptingAudio)){
     try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{} asrWS=null; asrOk=false;
-    setTimeout(()=>{if(active&&!usingFallback&&phase==='listening')connectASR();},0);
+    callLater(()=>{if(active&&!usingFallback&&phase==='listening')connectASR();},0);
   }
   setStatus('到你了 · 英语中文随便说，停顿约 '+(paceMs()/1000).toFixed(1).replace('.0','')+' 秒就轮到他'); }
 
@@ -1196,6 +1234,7 @@ function withLiveCoaching(messages){
 }
 
 async function handleUserSpeech(text,displayText){
+  if(!active)return;
   addLine('user',displayText||text);
   phase='thinking'; thinkingStartedAt=Date.now(); setHalo('thinking'); setStatus('Jake 在想…'); interrupted=false; genDone=false; curEmotion=''; replySeg=0; gapFills=0;
   const replyVersion=interruptVersion;
@@ -1303,10 +1342,18 @@ window.onerror=function(msg,src,line){ try{ setStatus('⚠️ 程序错误：'+m
 window.onunhandledrejection=function(ev){ try{ setStatus('⚠️ 异步错误：'+(ev.reason&&ev.reason.message||ev.reason)); }catch(e){} };
 function step(n,txt){ setStatus('['+n+'/4] '+txt); }
 function withTimeout(promise,ms,name){
-  return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error(name+' 超时（'+(ms/1000)+'秒）')),ms))]);
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(new Error(name+' 超时（'+(ms/1000)+'秒）')),ms);
+    Promise.resolve(promise).then(
+      value=>{clearTimeout(timer);resolve(value);},
+      error=>{clearTimeout(timer);reject(error);}
+    );
+  });
 }
 
 function resetCallRuntime(){
+  callGeneration++;
+  clearInterval(tick); tick=null;
   clearTimeout(silenceTimer); silenceTimer=null;
   clearTimeout(micSilenceTimer); micSilenceTimer=null;
   clearTimeout(turnCommitTimer); turnCommitTimer=null;
@@ -1319,16 +1366,17 @@ function resetCallRuntime(){
 }
 
 async function startCall(){
-  if(active||$('btnStart').disabled) return;   // 防重复触发
-  try{ await ensureLocalSettings(); }catch(e){ setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
-  if(!sGet('mm_key')){ $('keyOverlay').style.display='flex'; return; }
-  try{ validateKeysForCall(); }catch(e){ setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
+  if(active||starting||$('btnStart').disabled) return;   // 防重复触发
+  starting=true;
+  try{ await ensureLocalSettings(); }catch(e){ starting=false; setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
+  if(!sGet('mm_key')){ starting=false; $('keyOverlay').style.display='flex'; return; }
+  try{ validateKeysForCall(); }catch(e){ starting=false; setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
   resetCallRuntime();
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
   $('btnStart').textContent='◉ 通讯建立中…';   // 按下瞬间立刻给反馈
   callAbort=typeof AbortController==='function'?new AbortController():null;
   step(1,'接收地面简报 UPLINK…（最多15秒）');
-  setTimeout(()=>{ try{ playEntranceSound(); }catch(e){} },50);  // 音效延后，绝不拖慢首屏反馈
+  callLater(()=>{ try{ playEntranceSound(); }catch(e){} },50);  // 音效延后，绝不拖慢首屏反馈
   try{
     await withTimeout(fetchLocal('/api/diag', null, '本地诊断接口'),5000,'本地诊断接口');
     let cards;
@@ -1362,18 +1410,20 @@ async function startCall(){
     genDone=false; curEmotion=''; replySeg=0; gapFills=0;
     const openingVersion=interruptVersion;
     const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（MiniMax对话接口）');
-    if(openingVersion!==interruptVersion)return;
+    if(openingVersion!==interruptVersion){starting=false;return;}
     genDone=true;
     if(opening){history.push({role:'assistant',content:cleanForHistory(opening)}); addLine('assistant',cleanForDisplay(opening));}
+    starting=false;
     pumpQueue();
   }catch(err){
     setStatus('⚠️ 通讯建立失败：'+err.message+'<br><span style="font-size:11px;opacity:.8">把这行字发给开发者即可定位</span>');
-    active=false; phase='idle'; genDone=true; cleanup(); setHalo('');
+    active=false; starting=false; phase='idle'; genDone=true; cleanup(); setHalo('');
     $('btnEnd').style.display='none'; $('btnStart').style.display='inline-block';
     $('btnStart').disabled=false; $('btnStart').textContent='◉ 重新建立通讯'; renderPrepCard();
   }
 }
 function startTimer(){
+  clearInterval(tick);
   tick=setInterval(()=>{
     seconds++;
     $('clock').textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
@@ -1383,7 +1433,9 @@ function startTimer(){
   },1000);
 }
 function cleanup(){
-  fillGeneration++; interruptVersion++;
+  fillGeneration++; interruptVersion++; callGeneration++;
+  starting=false;
+  clearInterval(tick); tick=null;
   interrupted=true; audioQueue=[]; playing=false; playbackOwner=-1; genDone=true;
   if(callAbort){try{callAbort.abort();}catch{} callAbort=null;}
   const oldAudio=curAudio; stopCurrentAudio(); if(oldAudio){try{oldAudio.pause();}catch{}}
@@ -1394,7 +1446,7 @@ function cleanup(){
   try{if(audioCtx)audioCtx.close()}catch{}
   try{if(micStream)micStream.getTracks().forEach(t=>t.stop())}catch{}
   try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{}
-  try{if(fbRec){fbRec.onend=null;fbRec.abort();}}catch{}
+  try{if(fbRec){fbRec.onresult=null;fbRec.onerror=null;fbRec.onend=null;fbRec.abort();}}catch{}
   clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null;
   turnClosing=false; turnCommitSent=false; pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0; speakingStartedAt=0; thinkingStartedAt=0;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
@@ -1404,7 +1456,7 @@ function cleanup(){
 }
 async function endCall(showReport){
   if(!active)return;
-  active=false; phase='idle'; clearInterval(tick); interrupted=true; clearTimeout(silenceTimer);
+  active=false; phase='idle'; clearInterval(tick); tick=null; interrupted=true; clearTimeout(silenceTimer);
   if(curAudio){try{curAudio.pause()}catch{}} audioQueue=[]; playing=false;
   cleanup(); playCloseSound();   // 切断信道音效 + 底噪消失
   setHalo(''); setStatus('通讯已切断 · 下个轨道见'); $('conn').textContent='';

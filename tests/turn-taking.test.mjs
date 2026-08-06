@@ -132,7 +132,7 @@ function testBackendFailuresAreReportedTogether(){
     engQ:['db','xf'], engineFailures:[], engineFailing:false,
     asrWS:null, asrOk:true, asrAcceptingAudio:true, asrTries:2,
     console:{...console,warn:()=>{}}, earDiag:()=>{},
-    $:()=>conn, setTimeout:fn=>{scheduled=fn;return 1;},
+    $:()=>conn, callLater:fn=>{scheduled=fn;return 1;},
     active:true, usingFallback:false, connectASR:()=>{},
     startFallbackASR:reason=>{fallbackReason=reason;},
   });
@@ -191,17 +191,115 @@ async function testStalePlaybackCannotReopenMic(){
   assert.equal(ctx.playing,false);
 }
 
+async function testInterruptedSynthesisCannotPlayLateAudio(){
+  let releaseBlob, played=0;
+  const pendingBlob=new Promise(resolve=>{releaseBlob=resolve;});
+  const ctx=makeContext({
+    playing:false, playbackOwner:-1, interruptVersion:5, interrupted:false,
+    audioQueue:[pendingBlob], active:true, genDone:true, gapFills:0,
+    fillerBlobs:[], lastFiller:-1, phase:'thinking',
+    setHalo:()=>{}, setStatus:()=>{}, earDiag:()=>{}, startListening:()=>{},
+    playBlob:async()=>{played++;}, setTimeout:()=>0,
+  });
+  vm.runInContext(section('async function pumpQueue','/* \u64ad\u653e\u4e00\u6bb5\u8bed\u97f3'),ctx);
+
+  const pumping=ctx.pumpQueue();
+  ctx.interruptVersion++;
+  ctx.playbackOwner=-1;
+  ctx.playing=false;
+  ctx.interrupted=false;
+  releaseBlob({});
+  await pumping;
+  assert.equal(played,0);
+}
+
+function testOldCallTimersCannotEnterNewCall(){
+  let scheduled, ran=0;
+  const ctx=makeContext({
+    callGeneration:3,
+    setTimeout:fn=>{scheduled=fn;return 1;},
+  });
+  vm.runInContext(section('function callLater','/* ---------- \u8bbe\u7f6e\u5f39\u7a97 ---------- */'),ctx);
+  ctx.callLater(()=>{ran++;},300);
+  ctx.callGeneration++;
+  scheduled();
+  assert.equal(ran,0);
+}
+
+async function testLateMicrophonePermissionCannotReplaceNewCall(){
+  let grantPermission, stopped=0;
+  const oldStream={getTracks:()=>[{stop:()=>{stopped++;}}]};
+  const ctx=makeContext({
+    callGeneration:4, micPipeOk:true,
+    micStream:null, audioCtx:null, micSource:null, micNode:null, micSink:null,
+    navigator:{mediaDevices:{getUserMedia:()=>new Promise(resolve=>{grantPermission=resolve;})}},
+  });
+  vm.runInContext(section('async function openMic','let asrOk='),ctx);
+
+  const opening=ctx.openMic();
+  ctx.callGeneration++;
+  ctx.micPipeOk=true;
+  ctx.micStream='new-call-stream';
+  grantPermission(oldStream);
+  assert.equal(await opening,false);
+  assert.equal(stopped,1);
+  assert.equal(ctx.micPipeOk,true);
+  assert.equal(ctx.micStream,'new-call-stream');
+}
+
+async function testScoringCannotResumeAfterHangup(){
+  let finishScoring, handled=0, scored=0;
+  const ctx=makeContext({
+    phase:'listening', turnClosing:false, turnCommitSent:false,
+    micSilenceTimer:null, turnCommitTimer:null, interruptVersion:7,
+    finals:'hello', lastPartial:'', pendingEcho:'hello',
+    echoChunks:[{length:6400}], usingFallback:false, micLastVoice:1,
+    active:true, thinkingStartedAt:0,
+    clearTimeout:()=>{}, showPartial:()=>{}, listenAgain:()=>{}, fbStop:()=>{},
+    setHalo:()=>{}, setStatus:()=>{}, sGet:()=> 'configured',
+    iseEvaluate:()=>new Promise(resolve=>{finishScoring=resolve;}),
+    addScore:()=>{scored++;}, handleUserSpeech:()=>{handled++;},
+  });
+  vm.runInContext(section('async function finishTurn','function pcmToB64'),ctx);
+
+  const finishing=ctx.finishTurn();
+  assert.equal(ctx.phase,'processing');
+  ctx.active=false;
+  ctx.interruptVersion++;
+  finishScoring({human:'score',forJake:'report'});
+  await finishing;
+  assert.equal(scored,0);
+  assert.equal(handled,0);
+}
+
+async function testResolvedTimeoutClearsItsTimer(){
+  const timers=makeTimers();
+  const ctx=makeContext(timers);
+  vm.runInContext(section('function withTimeout','function resetCallRuntime'),ctx);
+  assert.equal(await ctx.withTimeout(Promise.resolve('ready'),5000,'test'),'ready');
+  assert.equal(timers.tasks.size,0);
+}
+
+function testStartLockPrecedesAsyncSetup(){
+  const startSource=section('async function startCall','function startTimer');
+  assert.match(startSource,/if\(active\|\|starting\|\|\$\('btnStart'\)\.disabled\) return/);
+  assert.ok(startSource.indexOf('starting=true')<startSource.indexOf('await ensureLocalSettings()'));
+  const cleanupSource=section('function cleanup','async function endCall');
+  assert.match(cleanupSource,/starting=false/);
+}
+
 async function testReconnectResetsRuntimeBeforeOpeningStream(){
   const cleared=[];
   const ctx=makeContext({
     clearTimeout:id=>cleared.push(id),
+    clearInterval:()=>{}, tick:null,
     silenceTimer:11, micSilenceTimer:12, turnCommitTimer:13,
     interrupted:true, audioQueue:[Promise.resolve({})], playing:true, playbackOwner:8, curAudio:{}, genDone:false,
     ttsErrShown:true, curEmotion:'angry', replySeg:4, gapFills:2, pendingEcho:'try me',
     finals:'old words', lastPartial:'old partial', partialEl:{}, echoChunks:[1],
     pendingPreRoll:[1], bargePreRoll:[1], bargeFrames:3,
     thinkingStartedAt:1, speakingStartedAt:1, turnClosing:true, turnCommitSent:true,
-    asrRestarting:true, engineFailing:true, interruptVersion:9, callAbort:null,
+    asrRestarting:true, engineFailing:true, interruptVersion:9, callGeneration:2, callAbort:null,
     hdrs:()=>({}), EMOTIONS:['neutral'],
   });
   const encoder=new TextEncoder();
@@ -244,6 +342,12 @@ testLiveCoachingPromptIsEphemeral();
 testBackendFailuresAreReportedTogether();
 await testStaleStreamCannotQueueSpeech();
 await testStalePlaybackCannotReopenMic();
+await testInterruptedSynthesisCannotPlayLateAudio();
+testOldCallTimersCannotEnterNewCall();
+await testLateMicrophonePermissionCannotReplaceNewCall();
+await testScoringCannotResumeAfterHangup();
+await testResolvedTimeoutClearsItsTimer();
+testStartLockPrecedesAsyncSetup();
 await testReconnectResetsRuntimeBeforeOpeningStream();
 
 console.log('turn-taking state tests passed');

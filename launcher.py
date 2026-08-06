@@ -9,6 +9,8 @@ can happen before importing server.py.
 import json
 import os
 import pathlib
+import re
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +26,15 @@ BASE_URL = f"http://{HOST}:{PORT}/"
 HEALTH_URL = BASE_URL + "api/diag"
 LOG_PATH = ROOT / f"server-{PORT}.log"
 OPEN_BROWSER = os.environ.get("UPLINK_NO_BROWSER") != "1"
+
+
+def expected_build():
+    try:
+        source = (ROOT / "server.py").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    match = re.search(r'^BUILD\s*=\s*["\']([^"\']+)["\']', source, re.MULTILINE)
+    return match.group(1) if match else ""
 
 
 def probe():
@@ -55,6 +66,25 @@ def start_server():
     return child
 
 
+def stop_outdated_server(status):
+    """Stop only a positively identified older Uplink process."""
+    if status.get("app") != "uplink":
+        return False
+    pid = status.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        if probe() is None:
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def tail_log(limit=1600):
     try:
         return LOG_PATH.read_text(encoding="utf-8", errors="replace")[-limit:].strip()
@@ -65,10 +95,18 @@ def tail_log(limit=1600):
 def main():
     existing = probe()
     if existing:
-        print(f"Uplink already running: {BASE_URL}")
-        if OPEN_BROWSER:
-            webbrowser.open(BASE_URL)
-        return 0
+        wanted = expected_build()
+        running = str(existing.get("build") or "")
+        if wanted and running and running != wanted:
+            print(f"Updating Uplink service: {running} -> {wanted}")
+            if not stop_outdated_server(existing):
+                print("An older Uplink service is still using port 8800. Restart the computer once, then launch again.", file=sys.stderr)
+                return 1
+        else:
+            print(f"Uplink already running: {BASE_URL}")
+            if OPEN_BROWSER:
+                webbrowser.open(BASE_URL)
+            return 0
 
     print("Starting Uplink service...")
     child = start_server()

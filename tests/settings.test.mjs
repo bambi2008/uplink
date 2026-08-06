@@ -32,4 +32,29 @@ const saveSection=html.slice(html.indexOf("$('keySave').onclick"),html.indexOf('
 assert.match(saveSection,/if\(!iseReady\)\{ xfIseKey=''; xfIseSecret=''; \}/);
 assert.doesNotMatch(saveSection,/讯飞评测 APIKey 不完整/);
 
+let restoreAttempts=0;
+const restoredValues={};
+const restoreContext=vm.createContext({
+  console,Promise,
+  SETTING_KEYS:['mm_key'],
+  TOKEN_SETTING_KEYS:new Set(['mm_key']), VOICES:[['voice','Voice']],
+  latinHeaderOk:()=>true,
+  cleanToken:value=>String(value||'').trim(),
+  sGet:key=>restoredValues[key]||'',
+  sSet:(key,value)=>{restoredValues[key]=value;},
+  setStatus:()=>{},
+  fetchLocal:async()=>{
+    restoreAttempts++;
+    if(restoreAttempts===1) throw new Error('server still starting');
+    return {ok:true,json:async()=>({settings:{mm_key:'restored-key'}})};
+  },
+});
+const restoreStart=html.indexOf('let settingsReady');
+const restoreEnd=html.indexOf('function localServerHint',restoreStart);
+vm.runInContext(html.slice(restoreStart,restoreEnd),restoreContext);
+assert.equal(await restoreContext.ensureLocalSettings(),false);
+assert.equal(await restoreContext.ensureLocalSettings(),true);
+assert.equal(restoreAttempts,2);
+assert.equal(restoredValues.mm_key,'restored-key');
+
 console.log('settings validation tests passed');

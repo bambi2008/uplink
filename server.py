@@ -478,6 +478,7 @@ async def ws_asr(req):
     await asyncio.wait([up, down], return_when=asyncio.FIRST_COMPLETED)
     for t in (up, down):
         t.cancel()
+    await asyncio.gather(up, down, return_exceptions=True)
     for closer in (ws_xf.close(), session.close(), ws_client.close()):
         with contextlib.suppress(Exception):
             await closer
@@ -659,7 +660,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-06.reconnect-stability-1"
+BUILD = "2026-08-06.lifecycle-stability-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -803,7 +804,8 @@ async def api_ise(req):
 
 async def api_diag(req):
     """让前端确认：server 是新版、doubao 模块是否加载成功。"""
-    return web.json_response({"build": BUILD, "doubao_loaded": _DB_OK, "doubao_error": _DB_ERR})
+    return web.json_response({"app": "uplink", "build": BUILD, "pid": os.getpid(),
+                              "doubao_loaded": _DB_OK, "doubao_error": _DB_ERR})
 
 
 async def api_asr_test(req):

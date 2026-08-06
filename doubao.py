@@ -211,8 +211,10 @@ async def doubao_relay(req):
 
     async def close_session():
         ws, st["ws"] = st["ws"], None
-        if st["reader"]:
-            st["reader"].cancel(); st["reader"] = None
+        reader, st["reader"] = st["reader"], None
+        if reader:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
         if ws is not None:
             with contextlib.suppress(Exception):
                 await ws.close()
@@ -320,6 +322,7 @@ async def doubao_relay(req):
     watch = asyncio.create_task(idle_watch())
     await asyncio.wait([up], return_when=asyncio.FIRST_COMPLETED)
     watch.cancel()
+    await asyncio.gather(up, watch, return_exceptions=True)
     await close_session()
     for closer in (session.close(), ws_client.close()):
         with contextlib.suppress(Exception):
