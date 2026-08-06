@@ -125,6 +125,30 @@ function testLiveCoachingPromptIsEphemeral(){
   assert.match(handler,/chatStream\(withLiveCoaching\(history\)/);
 }
 
+function testBackendFailuresAreReportedTogether(){
+  let fallbackReason='', scheduled=null;
+  const conn={innerHTML:''};
+  const ctx=makeContext({
+    engQ:['db','xf'], engineFailures:[], engineFailing:false,
+    asrWS:null, asrOk:true, asrAcceptingAudio:true, asrTries:2,
+    console:{...console,warn:()=>{}}, earDiag:()=>{},
+    $:()=>conn, setTimeout:fn=>{scheduled=fn;return 1;},
+    active:true, usingFallback:false, connectASR:()=>{},
+    startFallbackASR:reason=>{fallbackReason=reason;},
+  });
+  vm.runInContext(section('function failEngine','function connectASR'),ctx);
+
+  ctx.failEngine('豆包后端报错：HTTP 401');
+  assert.equal(ctx.engQ.length,1);
+  assert.match(ctx.engineFailures[0],/豆包.*401/);
+  assert.ok(scheduled);
+  scheduled();
+
+  ctx.failEngine('讯飞后端报错：授权不可用（10110）');
+  assert.match(fallbackReason,/豆包.*401/);
+  assert.match(fallbackReason,/讯飞.*10110/);
+}
+
 async function testStaleStreamCannotQueueSpeech(){
   let emitted=0, cancelled=false;
   const ctx=makeContext({
@@ -171,6 +195,7 @@ testPauseCanResume();
 testVoiceTakeoverNeedsSustainedSpeech();
 testInterruptInvalidatesOldWork();
 testLiveCoachingPromptIsEphemeral();
+testBackendFailuresAreReportedTogether();
 await testStaleStreamCannotQueueSpeech();
 await testStalePlaybackCannotReopenMic();
 

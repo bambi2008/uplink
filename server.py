@@ -87,8 +87,10 @@ def group_from(req):
 
 def xf_credentials(req):
     saved = _read_local_settings()
-    appid = saved.get("xf_appid") or req.query.get("appid") or ENV_XF_APPID
-    apikey = saved.get("xf_apikey") or req.query.get("apikey") or ENV_XF_APIKEY
+    # An explicit value is the one currently shown/typed in the page. It must
+    # win over a stale disk backup, especially for "test without saving".
+    appid = req.query.get("appid") or saved.get("xf_appid") or ENV_XF_APPID
+    apikey = req.query.get("apikey") or saved.get("xf_apikey") or ENV_XF_APIKEY
     return appid, apikey
 
 
@@ -103,6 +105,18 @@ def xf_handshake_url(appid, apikey):
     query = urlencode({"appid": appid, "ts": ts, "signa": signa,
                        "lang": "cn", "engLangType": 1})
     return f"wss://{XF_RTASR_HOST}/v1/ws?{query}"
+
+
+def xf_rejection_detail(payload):
+    """Turn Xunfei's ambiguous handshake payload into an actionable message."""
+    code = str(payload.get("code", "")) if isinstance(payload, dict) else ""
+    if code == "10110":
+        return ("讯飞实时语音转写授权不可用（10110）：请到这个 APPID 的「实时语音转写」服务页，"
+                "确认已领取/购买时长、授权仍在有效期内且有可用路数，并复制该服务卡片里的专用 APIKey")
+    if isinstance(payload, dict):
+        desc = str(payload.get("desc") or "握手被拒")
+        return f"讯飞握手失败（{code or '未知代码'}）：{desc[:120]}"
+    return "讯飞握手失败：" + str(payload)[:120]
 
 
 # ----------------------------------------------------------------- 静态页
@@ -383,7 +397,7 @@ async def ws_asr(req):
         first = await asyncio.wait_for(ws_xf.receive(), timeout=10)
         d = json.loads(first.data)
         if d.get("action") != "started":
-            await ws_client.send_json({"type": "error", "msg": "讯飞握手失败：" + str(d)[:120]})
+            await ws_client.send_json({"type": "error", "msg": xf_rejection_detail(d)})
             await ws_xf.close(); await ws_client.close(); await session.close()
             return ws_client
     except Exception as e:
@@ -627,7 +641,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-04.stability-1"
+BUILD = "2026-08-06.asr-recovery-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -784,7 +798,9 @@ async def api_asr_test(req):
             if not _DB_OK:
                 out["detail"] = "server 未加载豆包模块：" + _DB_ERR
                 return web.json_response(out)
-            appid = req.query.get("appid", ""); token = req.query.get("token", "")
+            saved = _read_local_settings()
+            appid = req.query.get("appid") or saved.get("db_appid", "")
+            token = req.query.get("token") or saved.get("db_token", "")
             if not appid or not token:
                 out["detail"] = "App ID 或 Access Token 为空"
                 return web.json_response(out)
@@ -839,9 +855,9 @@ async def api_asr_test(req):
                 if first.type == aiohttp.WSMsgType.TEXT:
                     j = json.loads(first.data)
                     ok = j.get("action") == "started"
-                    if not ok: msg = j.get("desc") or j.get("code") or msg
+                    if not ok: msg = xf_rejection_detail(j)
                 out["ok"] = ok
-                out["detail"] = "握手成功，讯飞可用 ✓" if ok else f"讯飞拒绝：{msg}"
+                out["detail"] = "握手成功，讯飞可用 ✓" if ok else msg
                 await ws.close()
             except Exception as e:
                 out["detail"] = f"连不上讯飞：{type(e).__name__} {str(e)[:140]}"

@@ -369,8 +369,8 @@ let settingsReady=null;
 function settingUsable(k,v){
   const value=cleanToken(v);
   if(!value) return false;
-  if(TOKEN_SETTING_KEYS.has(k)) return latinHeaderOk(value)&&!/[\s\u3400-\u9fff]/.test(value)&&!/Failed to fetch|通讯建立失败|连接失败|把这行字发给开发者/.test(value);
   if(['xf_apikey','xf_ise_key','xf_ise_secret'].includes(k) && value.length<16) return false;
+  if(TOKEN_SETTING_KEYS.has(k)) return latinHeaderOk(value)&&!/[\s\u3400-\u9fff]/.test(value)&&!/Failed to fetch|通讯建立失败|连接失败|把这行字发给开发者/.test(value);
   if(k==='asr_engine') return value==='xf'||value==='db';
   if(k==='mm_pace') return ['fast','normal','calm'].includes(value);
   if(k==='mm_tq') return value==='hd'||value==='turbo';
@@ -870,13 +870,15 @@ async function openMic(){
   }
 }
 let asrOk=false, asrTries=0, asrAcceptingAudio=false, usingFallback=false;
-let pendingEcho=null, echoChunks=[], engQ=null, asrGeneration=0, engineFailing=false;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
+let pendingEcho=null, echoChunks=[], engQ=null, engineFailures=[], asrGeneration=0, engineFailing=false;   // 跟读目标句 / 跟读音频 / 识别引擎尝试队列
 function failEngine(reason,failedWS){
   /* 当前引擎连不上：切队列里下一家（豆包↔讯飞热备份），都没了才退浏览器备用 */
   if(failedWS&&failedWS!==asrWS)return;
   if(engineFailing)return;
   engineFailing=true;
   const dead=engQ&&engQ.shift();
+  const source=dead==='db'?'豆包':dead==='xf'?'讯飞':'识别';
+  engineFailures.push(/^(豆包|讯飞)/.test(reason)?reason:source+'：'+reason);
   console.warn('识别引擎失效:',dead,reason);
   asrOk=false; asrAcceptingAudio=false; asrTries=0;
   const old=asrWS; asrWS=null;
@@ -885,7 +887,7 @@ function failEngine(reason,failedWS){
   if(engQ&&engQ.length){
     $('conn').innerHTML='识别 · 切换备用引擎（'+(engQ[0]==='db'?'豆包':'讯飞')+'）…';
     setTimeout(()=>{engineFailing=false; if(active&&!usingFallback)connectASR();},300);
-  } else { engineFailing=false; startFallbackASR(reason); }
+  } else { engineFailing=false; startFallbackASR(engineFailures.join('；')||reason); }
 }
 function connectASR(){
   /* 采集管线（WebAudio）没建起来，就没法给后端送音频 → 必须走备用识别 */
@@ -893,7 +895,7 @@ function connectASR(){
   if(engineFailing)return;
   const pref=sGet('asr_engine')||'xf';
   if(!engQ||!engQ.length){
-    engQ=[];
+    engQ=[]; engineFailures=[];
     const has={db:!!(sGet('db_appid')&&sGet('db_token')),
       xf:settingUsable('xf_appid',sGet('xf_appid'))&&settingUsable('xf_apikey',sGet('xf_apikey'))};
     [pref, pref==='db'?'xf':'db'].forEach(e=>{ if(has[e]) engQ.push(e); });
@@ -1370,6 +1372,7 @@ function cleanup(){
   clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null;
   turnClosing=false; turnCommitSent=false; pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0; speakingStartedAt=0; thinkingStartedAt=0;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
+  engQ=null; engineFailures=[]; engineFailing=false;
   ackBlobs=[]; fillerBlobs=[]; lastFiller=-1; lastAck=-1;
   fbLang='zh-CN'; asrOk=false; asrAcceptingAudio=false; asrTries=0; earDiag('');
 }
