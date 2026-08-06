@@ -4,6 +4,7 @@ __pycache__/
 Thumbs.db
 local-settings*.json
 server-*.log
+server.*.log
 claude-export/
 briefings/
 .playwright-cli/

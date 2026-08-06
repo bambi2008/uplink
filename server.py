@@ -301,7 +301,9 @@ async def api_chat(req):
     except Exception as e:
         with contextlib.suppress(Exception):
             await resp.write(("\n[[ERROR]]" + str(e)).encode("utf-8"))
-    await resp.write_eof()
+    # Browser reconnects intentionally cancel an older stream. That closed transport is expected.
+    with contextlib.suppress(ConnectionResetError, aiohttp.ClientConnectionError):
+        await resp.write_eof()
     return resp
 
 
@@ -657,7 +659,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-06.credentials-recovery-1"
+BUILD = "2026-08-06.reconnect-stability-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 

@@ -177,7 +177,7 @@ async function testStaleStreamCannotQueueSpeech(){
 async function testStalePlaybackCannotReopenMic(){
   let listeningStarts=0;
   const ctx=makeContext({
-    playing:false, interruptVersion:2, interrupted:false,
+    playing:false, playbackOwner:-1, interruptVersion:2, interrupted:false,
     audioQueue:[{}], active:true, genDone:true, gapFills:0,
     fillerBlobs:[], lastFiller:-1,
     setHalo:()=>{}, setStatus:()=>{}, earDiag:()=>{},
@@ -191,6 +191,52 @@ async function testStalePlaybackCannotReopenMic(){
   assert.equal(ctx.playing,false);
 }
 
+async function testReconnectResetsRuntimeBeforeOpeningStream(){
+  const cleared=[];
+  const ctx=makeContext({
+    clearTimeout:id=>cleared.push(id),
+    silenceTimer:11, micSilenceTimer:12, turnCommitTimer:13,
+    interrupted:true, audioQueue:[Promise.resolve({})], playing:true, playbackOwner:8, curAudio:{}, genDone:false,
+    ttsErrShown:true, curEmotion:'angry', replySeg:4, gapFills:2, pendingEcho:'try me',
+    finals:'old words', lastPartial:'old partial', partialEl:{}, echoChunks:[1],
+    pendingPreRoll:[1], bargePreRoll:[1], bargeFrames:3,
+    thinkingStartedAt:1, speakingStartedAt:1, turnClosing:true, turnCommitSent:true,
+    asrRestarting:true, engineFailing:true, interruptVersion:9, callAbort:null,
+    hdrs:()=>({}), EMOTIONS:['neutral'],
+  });
+  const encoder=new TextEncoder();
+  let reads=0, emitted='';
+  ctx.fetchLocal=async()=>({
+    ok:true,
+    body:{getReader:()=>({
+      read:async()=>reads++===0
+        ?{done:false,value:encoder.encode('[neutral] Jake is speaking after reconnect.')}
+        :{done:true},
+      cancel:()=>{throw new Error('fresh reconnect stream was cancelled');},
+    })},
+  });
+  vm.runInContext(section('function resetCallRuntime','async function startCall'),ctx);
+  vm.runInContext(section('async function chatStream','/* ---------- \u8bed\u97f3\u5408\u6210\u64ad\u653e\u961f\u5217 ---------- */'),ctx);
+
+  ctx.resetCallRuntime();
+  assert.equal(ctx.interrupted,false);
+  assert.equal(ctx.audioQueue.length,0);
+  assert.equal(ctx.playing,false);
+  assert.equal(ctx.playbackOwner,-1);
+  assert.equal(ctx.genDone,true);
+  assert.equal(ctx.ttsErrShown,false);
+  assert.equal(ctx.pendingEcho,null);
+  assert.deepEqual(cleared,[11,12,13]);
+
+  const full=await ctx.chatStream([],sentence=>{emitted=sentence;});
+  assert.equal(full,'Jake is speaking after reconnect.');
+  assert.equal(emitted,'Jake is speaking after reconnect.');
+
+  const startSource=section('async function startCall','function startTimer');
+  assert.ok(startSource.indexOf('resetCallRuntime()')<startSource.indexOf('callAbort='));
+  assert.ok(startSource.indexOf('resetCallRuntime()')<startSource.indexOf('chatStream(history'));
+}
+
 testPauseCanResume();
 testVoiceTakeoverNeedsSustainedSpeech();
 testInterruptInvalidatesOldWork();
@@ -198,5 +244,6 @@ testLiveCoachingPromptIsEphemeral();
 testBackendFailuresAreReportedTogether();
 await testStaleStreamCannotQueueSpeech();
 await testStalePlaybackCannotReopenMic();
+await testReconnectResetsRuntimeBeforeOpeningStream();
 
 console.log('turn-taking state tests passed');

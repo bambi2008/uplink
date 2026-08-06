@@ -545,7 +545,7 @@ function playWrapPing(){ try{ beep(520,0,0.3,0.05); beep(400,0.32,0.4,0.05); }ca
 /* ---------- 状态 ---------- */
 let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     active=false, phase='idle', curEmotion='',
-    audioQueue=[], playing=false, curAudio=null, genDone=true, interrupted=false,
+    audioQueue=[], playing=false, playbackOwner=-1, curAudio=null, genDone=true, interrupted=false,
     asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
 let callAbort=null, fillGeneration=0, interruptVersion=0;
@@ -687,8 +687,9 @@ function enqueueSpeech(text){
   const isFirst = (replySeg++===0);
   const hasCJK = /[\u4e00-\u9fff]/.test(text);
   const override = (isFirst && !hasCJK) ? 'speech-2.8-turbo' : null;
+  const speechVersion=interruptVersion;
   audioQueue.push(tts(text,null,curEmotion,override).catch(err=>{
-    if(!ttsErrShown){ ttsErrShown=true;
+    if(speechVersion===interruptVersion&&active&&!interrupted&&!ttsErrShown){ ttsErrShown=true;
       setStatus('⚠️ 语音合成失败：'+err.message+'<br><span style="font-size:11px">若提示 1004/GroupId，去通讯设置里补填 GroupId</span>'); }
     return null; }));
   pumpQueue();
@@ -722,13 +723,14 @@ let gapFills=0;
 async function pumpQueue(){
   if(playing)return;
   const playbackVersion=interruptVersion;
-  playing=true; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）'); phase='speaking';
+  playing=true; playbackOwner=playbackVersion; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）'); phase='speaking';
   earDiag('Jake 正在说 · 耳朵保持待命，你开口他会停下');
   while(audioQueue.length&&!interrupted&&playbackVersion===interruptVersion){
     const blob=await audioQueue.shift(); if(!blob||interrupted)continue;
     await playBlob(blob);
   }
-  playing=false;
+  if(playbackOwner!==playbackVersion)return;
+  playing=false; playbackOwner=-1;
   if(playbackVersion!==interruptVersion)return;
   if(genDone&&!audioQueue.length&&active&&!interrupted){ startListening(); return; }
   /* 队列空了但大脑还在生成 → 别冷场，隔一拍轻轻"嗯…"一声填住（每条回复最多补2次） */
@@ -776,7 +778,7 @@ function interruptJakeForUser(source,preRoll){
   if(phase!=='speaking'&&phase!=='thinking')return false;
   interruptVersion++; interrupted=true;
   const audio=curAudio; stopCurrentAudio(); if(audio){try{audio.pause()}catch{}}
-  audioQueue=[]; playing=false; genDone=true;
+  audioQueue=[]; playing=false; playbackOwner=-1; genDone=true;
   history.push({role:'user',content:source==='voice'
     ?'(The learner continued the same thought before you finished — stop immediately and let them complete it.)'
     :'(The learner interrupted you mid-sentence — let them speak.)'});
@@ -1304,11 +1306,24 @@ function withTimeout(promise,ms,name){
   return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error(name+' 超时（'+(ms/1000)+'秒）')),ms))]);
 }
 
+function resetCallRuntime(){
+  clearTimeout(silenceTimer); silenceTimer=null;
+  clearTimeout(micSilenceTimer); micSilenceTimer=null;
+  clearTimeout(turnCommitTimer); turnCommitTimer=null;
+  interrupted=false; audioQueue=[]; playing=false; playbackOwner=-1; curAudio=null; genDone=true;
+  ttsErrShown=false; curEmotion=''; replySeg=0; gapFills=0; pendingEcho=null;
+  finals=''; lastPartial=''; partialEl=null; echoChunks=[];
+  pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0;
+  thinkingStartedAt=0; speakingStartedAt=0;
+  turnClosing=false; turnCommitSent=false; asrRestarting=false; engineFailing=false;
+}
+
 async function startCall(){
   if(active||$('btnStart').disabled) return;   // 防重复触发
   try{ await ensureLocalSettings(); }catch(e){ setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
   if(!sGet('mm_key')){ $('keyOverlay').style.display='flex'; return; }
   try{ validateKeysForCall(); }catch(e){ setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
+  resetCallRuntime();
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
   $('btnStart').textContent='◉ 通讯建立中…';   // 按下瞬间立刻给反馈
   callAbort=typeof AbortController==='function'?new AbortController():null;
@@ -1369,8 +1384,10 @@ function startTimer(){
 }
 function cleanup(){
   fillGeneration++; interruptVersion++;
+  interrupted=true; audioQueue=[]; playing=false; playbackOwner=-1; genDone=true;
   if(callAbort){try{callAbort.abort();}catch{} callAbort=null;}
   const oldAudio=curAudio; stopCurrentAudio(); if(oldAudio){try{oldAudio.pause();}catch{}}
+  curAudio=null;
   try{if(micNode){micNode.disconnect();micNode.onaudioprocess=null;}}catch{}
   try{if(micSource)micSource.disconnect()}catch{}
   try{if(micSink)micSink.disconnect()}catch{}
