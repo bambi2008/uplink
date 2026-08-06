@@ -362,6 +362,10 @@ function tokenProblem(label,v){
   if(/\s/.test(v)) return label+'里有空格或换行，请重新粘贴';
   return '';
 }
+function credentialCollision(mm,db){
+  const a=cleanToken(mm), b=cleanToken(db);
+  return !!(a&&b&&a===b);
+}
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
 const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
@@ -573,12 +577,14 @@ function renderVoices(){
   });
   box.onclick=async e=>{
     const b=e.target.closest('button'); if(!b)return; e.preventDefault();
-    if($('keyInput').value.trim()) sSet('mm_key',$('keyInput').value.trim());
-    if($('ttsKeyInput').value.trim()) sSet('mm_tts_key',cleanToken($('ttsKeyInput').value));
-    await saveLocalSettings();
-    if(!sGet('mm_key')){alert('先填 API Key 才能试听');return;}
+    const auditionKey=cleanToken($('ttsKeyInput').value)||cleanToken($('keyInput').value);
+    if(!auditionKey){alert('先填 MiniMax API Key 才能试听');return;}
+    if(tokenProblem('MiniMax API Key',auditionKey)){alert(tokenProblem('MiniMax API Key',auditionKey));return;}
+    if(credentialCollision(auditionKey,$('dbToken').value)){
+      alert('MiniMax API Key 和豆包 Access Token 不能是同一个值。当前两栏被填成了一样，请重新复制 MiniMax 的接口密钥。'); return;
+    }
     const old=b.textContent; b.textContent='…'; b.disabled=true;
-    try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '');
+    try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '', null, auditionKey);
       const a=new Audio(URL.createObjectURL(blob)); a.onended=()=>{b.textContent=old;b.disabled=false}; await a.play();
     }catch(err){alert('试听失败：'+err.message);b.textContent=old;b.disabled=false}
   };
@@ -587,27 +593,30 @@ $('keySave').onclick=async ()=>{
   const v=cleanToken($('keyInput').value); if(!v){alert('请粘贴 MiniMax API Key');return;}
   const ttsKey=cleanToken($('ttsKeyInput').value);
   const g=cleanToken($('groupInput').value);
-  const xfKey=cleanToken($('xfApikey').value), xfIseKey=cleanToken($('xfIseKey').value), xfIseSecret=cleanToken($('xfIseSecret').value);
+  const dbToken=cleanToken($('dbToken').value), xfKey=cleanToken($('xfApikey').value);
+  let xfIseKey=cleanToken($('xfIseKey').value), xfIseSecret=cleanToken($('xfIseSecret').value);
+  const iseReady=settingUsable('xf_ise_key',xfIseKey)&&settingUsable('xf_ise_secret',xfIseSecret);
+  const iseIgnored=!!((xfIseKey||xfIseSecret)&&!iseReady);
+  if(!iseReady){ xfIseKey=''; xfIseSecret=''; }
   const bad=[tokenProblem('MiniMax API Key',v), ttsKey?tokenProblem('MiniMax 语音 API Key',ttsKey):'', g?tokenProblem('MiniMax GroupId',g):'',
     xfKey&&!settingUsable('xf_apikey',xfKey)?'讯飞 APIKey 不完整，请复制实时语音转写服务页里的完整 APIKey':'',
-    xfIseKey&&!settingUsable('xf_ise_key',xfIseKey)?'讯飞评测 APIKey 不完整，请复制完整值':'',
-    xfIseSecret&&!settingUsable('xf_ise_secret',xfIseSecret)?'讯飞评测 APISecret 不完整，请复制完整值':''].filter(Boolean);
+    credentialCollision(v,dbToken)?'MiniMax API Key 和豆包 Access Token 被填成了同一个值，请重新复制 MiniMax 的接口密钥':''].filter(Boolean);
   if(bad.length){ alert(bad.join('\n')); return; }
   sSet('mm_key',v); sSet('mm_tts_key',ttsKey); sSet('mm_group',g);
   sSet('xf_appid',cleanToken($('xfAppid').value)); sSet('xf_apikey',cleanToken($('xfApikey').value));
-  sSet('db_appid',cleanToken($('dbAppid').value)); sSet('db_token',cleanToken($('dbToken').value));
+  sSet('db_appid',cleanToken($('dbAppid').value)); sSet('db_token',dbToken);
   sSet('user_name',$('unName').value.trim().replace(/\b[a-z]/g,c=>c.toUpperCase()));
-  sSet('xf_ise_key',$('xfIseKey').value.trim()); sSet('xf_ise_secret',$('xfIseSecret').value.trim());
+  sSet('xf_ise_key',xfIseKey); sSet('xf_ise_secret',xfIseSecret);
   const eng=document.querySelector('input[name=asrEngine]:checked'); sSet('asr_engine',eng?eng.value:'xf');
   const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
   const tq=document.querySelector('input[name=tqMode]:checked'); sSet('mm_tq',tq?tq.value:'hd');
   const voice=document.querySelector('input[name=voicePick]:checked'); if(voice)sSet('mm_voice',voice.value);
   await saveLocalSettings();
-  $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 已同步到本机私有设置，可以打电话了。');
+  $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 已同步到本机私有设置，可以打电话了。'+(iseIgnored?' 讯飞发音评测凭据不完整，已保持关闭。':''));
 };
 
 /* ---------- 后端 API ---------- */
-async function tts(text, vid, emotion, modelOverride){
+async function tts(text, vid, emotion, modelOverride, keyOverride){
   /* 音质档位：高清hd（默认）/ 极速turbo。语言增强按句子成分智能选：
      纯英文→English（韵律地道）；中文为主→Chinese（治中文AI味）；混合→auto */
   const model = modelOverride || ((sGet('mm_tq')||'hd')==='turbo' ? 'speech-2.8-turbo' : 'speech-2.8-hd');
@@ -616,7 +625,7 @@ async function tts(text, vid, emotion, modelOverride){
   let boost='auto';
   if(cjk===0) boost='English';
   else if(cjk>latin) boost='Chinese';
-  const options={method:'POST',headers:hdrs({},sGet('mm_tts_key')||sGet('mm_key')),
+  const options={method:'POST',headers:hdrs({},keyOverride||sGet('mm_tts_key')||sGet('mm_key')),
     body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
       model, language_boost: boost})};
   if(callAbort) options.signal=callAbort.signal;

@@ -2,7 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
-local-settings.json
+local-settings*.json
 server-*.log
 claude-export/
 briefings/

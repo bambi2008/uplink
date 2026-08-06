@@ -72,17 +72,18 @@ ENV_XF_APIKEY = os.environ.get("XF_APIKEY", "")
 
 
 def key_from(req):
-    saved = _read_local_settings().get("mm_key", "")
-    if saved:
-        return saved
     auth = req.headers.get("Authorization", "")
     if isinstance(auth, str) and auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return (req.headers.get("X-MM-Key") or ENV_KEY).strip()
+        supplied = auth[7:].strip()
+        if supplied:
+            return supplied
+    supplied = (req.headers.get("X-MM-Key") or "").strip()
+    return supplied or _read_local_settings().get("mm_key", "") or ENV_KEY
 
 
 def group_from(req):
-    return _read_local_settings().get("mm_group", "") or req.headers.get("X-MM-Group") or ENV_GROUP
+    supplied = (req.headers.get("X-MM-Group") or "").strip()
+    return supplied or _read_local_settings().get("mm_group", "") or ENV_GROUP
 
 
 def xf_credentials(req):
@@ -194,12 +195,23 @@ async def api_local_settings(req):
     if not isinstance(body, dict):
         return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
     incoming = body.get("settings") or {}
+    if not isinstance(incoming, dict):
+        return web.json_response({"error": "settings 必须是 JSON 对象"}, status=400)
     async with SETTINGS_LOCK:
         clean = _read_local_settings()
         for key in SAFE_SETTING_KEYS:
+            if key not in incoming:
+                continue
             value = incoming.get(key)
+            if isinstance(value, str) and not value.strip():
+                clean.pop(key, None)
+                continue
             if _setting_usable(key, value):
                 clean[key] = value.strip()
+        current = _read_local_settings()
+        if current != clean and LOCAL_SETTINGS.exists():
+            backup = LOCAL_SETTINGS.with_name("local-settings.backup.json")
+            backup.write_bytes(LOCAL_SETTINGS.read_bytes())
         tmp = LOCAL_SETTINGS.with_suffix(".tmp")
         tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, LOCAL_SETTINGS)
@@ -324,7 +336,11 @@ async def api_tts(req):
         return web.json_response({"error": "请求体不是 JSON"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
-    key = _read_local_settings().get("mm_tts_key", "") or key_from(req)
+    auth = req.headers.get("Authorization", "")
+    supplied = auth[7:].strip() if isinstance(auth, str) and auth.lower().startswith("bearer ") else ""
+    supplied = supplied or (req.headers.get("X-MM-Key") or "").strip()
+    saved = _read_local_settings()
+    key = supplied or saved.get("mm_tts_key", "") or saved.get("mm_key", "") or ENV_KEY
     group = group_from(req)
     if not key:
         return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
@@ -641,7 +657,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-06.asr-recovery-1"
+BUILD = "2026-08-06.credentials-recovery-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
