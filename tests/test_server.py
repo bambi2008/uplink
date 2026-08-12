@@ -60,6 +60,47 @@ class MiniMaxCredentialTests(unittest.TestCase):
             self.assertEqual(server.key_from(request), "current-key")
 
 
+class LatencyP0Tests(unittest.TestCase):
+    def setUp(self):
+        server.MODEL_NEGATIVE_CACHE.clear()
+
+    def test_only_explicit_model_unavailable_errors_are_negative_cached(self):
+        self.assertTrue(server._model_failure_is_cacheable(404, "model MiniMax-X not found"))
+        self.assertTrue(server._model_failure_is_cacheable(400, "unsupported model"))
+        for status in (401, 403, 429, 500, 503):
+            self.assertFalse(server._model_failure_is_cacheable(status, "model not available"))
+        self.assertFalse(server._model_failure_is_cacheable(400, "invalid request body"))
+
+    def test_negative_model_cache_expires(self):
+        with patch.object(server, "CHAT_MODELS", ("primary", "fallback")):
+            server._cache_model_failure("primary", now=100.0)
+            self.assertEqual(server._chat_model_candidates(now=101.0), ["fallback"])
+            self.assertEqual(server._chat_model_candidates(now=701.0), ["primary", "fallback"])
+
+    def test_latency_sanitizer_drops_credentials_transcripts_and_audio(self):
+        clean = server._sanitize_latency({
+            "turn_id": "anonymous-1", "duration_ms": 123.4,
+            "semantic_first_audio_ms": 876.5,
+            "Authorization": "Bearer secret", "api_key": "secret",
+            "AccessToken": "secret", "transcript": "full words",
+            "prompt_text": "private words", "audio_bytes_raw": "private audio",
+        })
+        self.assertEqual(clean, {"turn_id": "anonymous-1", "duration_ms": 123.4,
+                                 "semantic_first_audio_ms": 876.5})
+
+
+class SharedHttpClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_application_client_is_created_once_and_closed_on_cleanup(self):
+        app = {}
+        context = server.http_client_context(app)
+        await anext(context)
+        client = app[server.HTTP_CLIENT_KEY]
+        self.assertFalse(client.closed)
+        with self.assertRaises(StopAsyncIteration):
+            await anext(context)
+        self.assertTrue(client.closed)
+
+
 class FakeSettingsRequest:
     method = "POST"
 

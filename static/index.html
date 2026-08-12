@@ -555,12 +555,57 @@ let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
 let callAbort=null, fillGeneration=0, interruptVersion=0, callGeneration=0;
+let fillerAbort=null, fillerWarmStarted=false, fillersReady=false, semanticHasPlayed=false;
+let runtimeFeatures={latency_trace:false,low_latency:true,fast_eot:false,stream_tts:false};
+let activeTurnTrace=null, turnTraceSequence=0;
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
 function callLater(fn,delay){
   const generation=callGeneration;
   return setTimeout(()=>{if(generation===callGeneration)fn();},delay);
 }
+
+class TurnLatencyTrace{
+  constructor(source){
+    this.id=Date.now().toString(36)+'-'+(++turnTraceSequence).toString(36);
+    this.source=source||'voice'; this.marks={}; this.cancelled=false; this.finalized=false;
+    this.mark('turn_started');
+  }
+  mark(name,extra){
+    if(this.cancelled||this.finalized)return;
+    this.marks[name]=performance.now();
+    if(name==='semantic_audio_playing')this.finish(extra);
+  }
+  finish(extra){
+    if(this.cancelled||this.finalized)return;
+    this.finalized=true;
+    const base=this.marks.last_effective_voice||this.marks.turn_started;
+    const elapsed={};
+    Object.entries(this.marks).forEach(([name,value])=>{elapsed[name]=Math.round((value-base)*10)/10;});
+    const event={type:'turn_latency',turn_id:this.id,source_kind:this.source,
+      semantic_first_audio_ms:elapsed.semantic_audio_playing,stages_ms:elapsed,...(extra||{})};
+    if(runtimeFeatures.latency_trace){
+      console.info('[uplink-latency]',event);
+      fetch('/api/latency',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(event)}).catch(()=>{});
+    }
+  }
+  cancel(reason){
+    if(this.finalized||this.cancelled)return;
+    this.cancelled=true;
+    if(runtimeFeatures.latency_trace){
+      const event={type:'turn_cancelled',turn_id:this.id,reason:String(reason||'cancelled').slice(0,48)};
+      console.info('[uplink-latency]',event);
+      fetch('/api/latency',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(event)}).catch(()=>{});
+    }
+  }
+}
+function beginTurnTrace(source){
+  if(activeTurnTrace&&!activeTurnTrace.finalized)activeTurnTrace.cancel('superseded');
+  activeTurnTrace=new TurnLatencyTrace(source);
+  return activeTurnTrace;
+}
+function markTurn(name,extra){if(activeTurnTrace)activeTurnTrace.mark(name,extra);}
+function cancelTurnTrace(reason){if(activeTurnTrace)activeTurnTrace.cancel(reason);}
 
 /* ---------- 设置弹窗 ---------- */
 $('btnKey').onclick=async ()=>{
@@ -627,7 +672,7 @@ $('keySave').onclick=async ()=>{
 };
 
 /* ---------- 后端 API ---------- */
-async function tts(text, vid, emotion, modelOverride, keyOverride){
+async function tts(text, vid, emotion, modelOverride, keyOverride, meta){
   /* 音质档位：高清hd（默认）/ 极速turbo。语言增强按句子成分智能选：
      纯英文→English（韵律地道）；中文为主→Chinese（治中文AI味）；混合→auto */
   const model = modelOverride || ((sGet('mm_tq')||'hd')==='turbo' ? 'speech-2.8-turbo' : 'speech-2.8-hd');
@@ -636,41 +681,50 @@ async function tts(text, vid, emotion, modelOverride, keyOverride){
   let boost='auto';
   if(cjk===0) boost='English';
   else if(cjk>latin) boost='Chinese';
+  meta=meta||{};
   const options={method:'POST',headers:hdrs({},keyOverride||sGet('mm_tts_key')||sGet('mm_key')),
     body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
-      model, language_boost: boost})};
-  if(callAbort) options.signal=callAbort.signal;
+      model,language_boost:boost,purpose:meta.purpose||'semantic',turn_id:meta.turnId||''})};
+  if(meta.signal)options.signal=meta.signal;
+  else if(callAbort) options.signal=callAbort.signal;
+  if((meta.purpose||'semantic')==='semantic')markTurn('tts_request');
   const r=await fetchLocal('/api/tts',options, '语音合成接口');
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
-  return await r.blob();
+  if((meta.purpose||'semantic')==='semantic')markTurn('tts_first_response_chunk');
+  const blob=await r.blob();
+  if((meta.purpose||'semantic')==='semantic')markTurn('tts_complete');
+  return blob;
 }
-async function chatStream(messages, onSentence){
+async function chatStream(messages, onSentence, turnId){
   const streamVersion=interruptVersion;
-  const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages})};
+  const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages,turn_id:turnId||''})};
   if(callAbort) options.signal=callAbort.signal;
+  if(turnId)markTurn('chat_request');
   const r=await fetchLocal('/api/chat',options, 'MiniMax 对话接口');
-  if(!r.ok) throw new Error('对话失败 '+r.status);
+  if(!r.ok){let m='';try{m=(await r.json()).error}catch{};throw new Error('对话失败 '+r.status+(m?'：'+m:''));}
   const reader=r.body.getReader(), dec=new TextDecoder();
-  let full='',pending='',emoDone=false,emoBuf='',firstOut=false;
+  let full='',pending='',emoDone=false,emoBuf='',firstOut=false,firstRaw=false;
   const SENT=/[.!?。！？]["')」』]?\s*$/, SOFT=/[,;:.!?，。！？；：…]["')」』]?\s*$/;
   function absorb(t){
     if(!emoDone){ emoBuf+=t; const m=emoBuf.match(/^\s*\[(\w+)\]\s*/);
       if(m){const e=m[1].toLowerCase(); if(EMOTIONS.includes(e))curEmotion=(e==='neutral'?'':e); emoDone=true; t=emoBuf.slice(m[0].length); emoBuf='';}
       else if(emoBuf.length>24){emoDone=true;t=emoBuf;emoBuf='';} else return; }
     pending+=t; full+=t;
-    if(!firstOut && pending.trim().length>=10 && SOFT.test(pending)){onSentence(pending.trim());pending='';firstOut=true;return;}
-    if(pending.length>=18 && SENT.test(pending)){onSentence(pending.trim());pending='';firstOut=true;}
+    if(!firstOut && pending.trim().length>=10 && SOFT.test(pending)){if(turnId)markTurn('chat_first_speakable');onSentence(pending.trim());pending='';firstOut=true;return;}
+    if(pending.length>=18 && SENT.test(pending)){if(!firstOut&&turnId)markTurn('chat_first_speakable');onSentence(pending.trim());pending='';firstOut=true;}
   }
   while(true){
     const {done,value}=await reader.read(); if(done)break;
     if(interrupted||streamVersion!==interruptVersion){try{reader.cancel()}catch{};break;}
     const chunk=dec.decode(value,{stream:true});
+    if(!firstRaw&&chunk){firstRaw=true;if(turnId)markTurn('chat_first_raw');}
     if(chunk.includes('[[ERROR]]')) throw new Error(chunk.split('[[ERROR]]')[1]||'服务出错');
     absorb(chunk);
   }
   if(streamVersion!==interruptVersion)return '';
   if(emoBuf.trim()&&!interrupted){pending+=emoBuf;full+=emoBuf;}
-  if(pending.trim()&&!interrupted)onSentence(pending.trim());
+  if(pending.trim()&&!interrupted){if(!firstOut&&turnId)markTurn('chat_first_speakable');onSentence(pending.trim());}
+  if(turnId)markTurn('chat_complete');
   return full.trim();
 }
 
@@ -687,6 +741,9 @@ function sanitizeSpeech(t){
   /* 声音标签白名单归一（TTS能渲染成真实声音）；其余括号舞台说明剥掉不念 */
   return stripParentheticals(t,true);
 }
+function firstSegmentTtsModel(isFirst){
+  return runtimeFeatures.low_latency&&isFirst?'speech-2.8-turbo':null;
+}
 function enqueueSpeech(text){
   /* Jake 在要求跟读的回合末尾埋 [echo: 目标句]，读出来之前剥掉并记下目标 */
   text=text.replace(/\[\s*echo\s*:\s*([^\]]+)\]/ig,(m,p)=>{pendingEcho=p.trim();return '';});
@@ -694,12 +751,13 @@ function enqueueSpeech(text){
   if(!text.trim()) return;
   /* 双重确认保险：垫词已替他说过"OK"，若首句仍是纯反应词就跳过不念 */
   if(replySeg===0 && /^(oh[,!]?\s*)?(ok(ay)?|right( right)?|nice( one)?|perfect|great|awesome|alright|got it|love (that|it)|wow|exactly|totally|sweet|cool)[.!,]?$/i.test(text.trim())) return;
-  /* 首句抢跑只对英文生效（差异听不出）；含中文的句子一律高清，治中文AI味 */
+  cancelFillerWarmup();
+  /* P0: first meaningful segment uses Turbo in every language. */
   const isFirst = (replySeg++===0);
-  const hasCJK = /[\u4e00-\u9fff]/.test(text);
-  const override = (isFirst && !hasCJK) ? 'speech-2.8-turbo' : null;
+  const override = firstSegmentTtsModel(isFirst);
   const speechVersion=interruptVersion;
-  audioQueue.push(tts(text,null,curEmotion,override).catch(err=>{
+  const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
+  audioQueue.push(tts(text,null,curEmotion,override,null,{purpose:'semantic',turnId}).then(blob=>({blob,purpose:'semantic',turnId})).catch(err=>{
     if(speechVersion===interruptVersion&&active&&!interrupted&&!ttsErrShown){ ttsErrShown=true;
       setStatus('⚠️ 语音合成失败：'+err.message+'<br><span style="font-size:11px">若提示 1004/GroupId，去通讯设置里补填 GroupId</span>'); }
     return null; }));
@@ -711,16 +769,29 @@ async function prepFillers(){
      thinks = 思考音，只用于 Jake 说话中途生成卡顿时填缝 */
   const generation=++fillGeneration;
   ackBlobs=[]; fillerBlobs=[];
-  const acks=['OK!','Mm-hm.','Right.','Alright—','Ah, okay.','Oh, nice.','Got it.'];
-  const thinks=['Hmm...','Mm...','(emm)','So—','Well—','Uh, let me see...','Right, so—','And, um—'];
+  const acks=['Mm-hm.','Right.','Got it.'];
+  const thinks=['Hmm...','(emm)'];
+  fillerAbort=typeof AbortController==='function'?new AbortController():null;
   for(const t of acks){
     if(!active||generation!==fillGeneration)return;
-    try{ const blob=await tts(t,null,''); if(active&&generation===fillGeneration)ackBlobs.push(blob); }catch(e){}
+    try{ const blob=await tts(t,null,'',null,null,{purpose:'ack',signal:fillerAbort&&fillerAbort.signal}); if(active&&generation===fillGeneration)ackBlobs.push(blob); }catch(e){}
   }
   for(const t of thinks){
     if(!active||generation!==fillGeneration)return;
-    try{ const blob=await tts(t,null,''); if(active&&generation===fillGeneration)fillerBlobs.push(blob); }catch(e){}
+    try{ const blob=await tts(t,null,'',null,null,{purpose:'filler',signal:fillerAbort&&fillerAbort.signal}); if(active&&generation===fillGeneration)fillerBlobs.push(blob); }catch(e){}
   }
+  fillerAbort=null;
+  fillerWarmStarted=false;
+  fillersReady=true;
+}
+function cancelFillerWarmup(){
+  if(fillerAbort){try{fillerAbort.abort()}catch{}fillerAbort=null;fillGeneration++;}
+  fillerWarmStarted=false;
+}
+function scheduleFillerWarmup(){
+  if(!semanticHasPlayed||fillersReady||fillerWarmStarted||!active||phase!=='listening')return;
+  fillerWarmStarted=true;
+  callLater(()=>{if(active&&phase==='listening'&&fillerWarmStarted)prepFillers();},120);
 }
 let lastFiller=-1, lastAck=-1;
 function playFiller(){
@@ -728,7 +799,8 @@ function playFiller(){
   if(!ackBlobs.length) return;
   let i; do{ i=Math.floor(Math.random()*ackBlobs.length); }while(ackBlobs.length>1&&i===lastAck);
   lastAck=i;
-  audioQueue.push(Promise.resolve(ackBlobs[i])); pumpQueue();
+  const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
+  audioQueue.push(Promise.resolve({blob:ackBlobs[i],purpose:'ack',turnId})); pumpQueue();
 }
 let gapFills=0;
 async function pumpQueue(){
@@ -737,22 +809,23 @@ async function pumpQueue(){
   playing=true; playbackOwner=playbackVersion; setHalo('speaking'); setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）'); phase='speaking';
   earDiag('Jake 正在说 · 耳朵保持待命，你开口他会停下');
   while(audioQueue.length&&!interrupted&&playbackVersion===interruptVersion){
-    const blob=await audioQueue.shift();
+    const item=await audioQueue.shift();
     if(playbackVersion!==interruptVersion||playbackOwner!==playbackVersion)break;
-    if(!blob||interrupted)continue;
-    await playBlob(blob);
+    if(!item||interrupted)continue;
+    const blob=item.blob||item;
+    await playBlob(blob,item.blob?item:{});
   }
   if(playbackOwner!==playbackVersion)return;
   playing=false; playbackOwner=-1;
   if(playbackVersion!==interruptVersion)return;
-  if(genDone&&!audioQueue.length&&active&&!interrupted){ startListening(); return; }
+  if(genDone&&!audioQueue.length&&active&&!interrupted){ startListening(); scheduleFillerWarmup(); return; }
   /* 队列空了但大脑还在生成 → 别冷场，隔一拍轻轻"嗯…"一声填住（每条回复最多补2次） */
   if(!genDone&&active&&!interrupted&&gapFills<2){
     gapFills++;
     setTimeout(()=>{
       if(playbackVersion===interruptVersion&&!genDone&&active&&!interrupted&&!playing&&!audioQueue.length&&fillerBlobs.length){
         let i; do{ i=Math.floor(Math.random()*fillerBlobs.length); }while(fillerBlobs.length>1&&i===lastFiller);
-        lastFiller=i; audioQueue.push(Promise.resolve(fillerBlobs[i])); pumpQueue();
+        lastFiller=i; audioQueue.push(Promise.resolve({blob:fillerBlobs[i],purpose:'filler'})); pumpQueue();
       }
     },650);
   }
@@ -761,7 +834,7 @@ async function pumpQueue(){
 /* 播放一段语音；被浏览器自动播放策略拦截时，提示用户点一下解锁并在点击后重播 */
 let audioUnlocked=false;
 let stopCurrentAudio=()=>{};
-function playBlob(blob){
+function playBlob(blob,meta){
   return new Promise(res=>{
     const url=URL.createObjectURL(blob), audio=new Audio(url);
     let done=false, unlockHandler=null;
@@ -776,12 +849,20 @@ function playBlob(blob){
     stopCurrentAudio=finish; curAudio=audio;
     audio.onended=finish;
     audio.onerror=()=>{ setStatus('⚠️ 音频播放出错（设备/驱动问题）'); finish(); };
-    audio.play().then(()=>{audioUnlocked=true;speakingStartedAt=Date.now();bargeNoiseFloor=Math.max(micNoiseFloor,0.003);}).catch(err=>{
+    const onPlaying=()=>{
+      audioUnlocked=true;speakingStartedAt=Date.now();bargeNoiseFloor=Math.max(micNoiseFloor,0.003);
+      if(meta&&meta.purpose==='ack')markTurn('ack_audio_playing');
+      if(meta&&meta.purpose==='semantic'){
+        semanticHasPlayed=true;
+        if(!meta.turnId||!activeTurnTrace||meta.turnId===activeTurnTrace.id)markTurn('semantic_audio_playing',{tts_path:'blob'});
+      }
+    };
+    audio.play().then(onPlaying).catch(err=>{
       if(!audioUnlocked){
         setStatus('🔊 浏览器拦了声音 · <b>请点击页面任意位置解锁</b>');
         unlockHandler=()=>{
           unlockHandler=null;
-          audio.play().then(()=>{audioUnlocked=true;speakingStartedAt=Date.now();bargeNoiseFloor=Math.max(micNoiseFloor,0.003);setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）');}).catch(finish); };
+          audio.play().then(()=>{onPlaying();setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）');}).catch(finish); };
         document.addEventListener('pointerdown',unlockHandler);
       } else { finish(); }
     });
@@ -789,6 +870,7 @@ function playBlob(blob){
 }
 function interruptJakeForUser(source,preRoll){
   if(phase!=='speaking'&&phase!=='thinking')return false;
+  cancelTurnTrace('user_interrupted');
   interruptVersion++; interrupted=true;
   const audio=curAudio; stopCurrentAudio(); if(audio){try{audio.pause()}catch{}}
   audioQueue=[]; playing=false; playbackOwner=-1; genDone=true;
@@ -887,8 +969,10 @@ async function openMic(){
       }
       if(micLevel>voiceThreshold){
         if(turnClosing&&!turnCommitSent)resumeAudioTurn();
+        if(!micSpeechStarted)beginTurnTrace('microphone');
         micLastVoice=Date.now();
         micSpeechStarted=true;
+        markTurn('last_effective_voice');
         armMicSilence();
       }
       /* 跟读评测旁路：Jake 要求跟读时，这轮音频留一份（上限30秒），说完送去发音评测 */
@@ -1001,6 +1085,7 @@ function armMicSilence(){
 function closeAudioTurn(){
   if(turnClosing||phase!=='listening') return;
   turnClosing=true; turnCommitSent=false;
+  markTurn('eot_candidate');
   clearTimeout(turnCommitTimer);
   earDiag('麦克风 · 听到停顿，再等你一拍…');
   setStatus('Jake 在等你把这句话说完…');
@@ -1017,6 +1102,7 @@ function resumeAudioTurn(){
 function commitAudioTurn(){
   if(!turnClosing||phase!=='listening')return;
   turnCommitSent=true;
+  markTurn('eot_commit');
   earDiag('麦克风 · 停顿确认，正在结算这一句…');
   if(usingFallback) fbStop();
   try{ if(asrWS&&asrWS.readyState===1){asrAcceptingAudio=false;asrWS.send('stop');} }catch{}
@@ -1097,6 +1183,10 @@ function fbStart(){
       else interim+=e.results[i][0].transcript;
     }
     const live=(finals+interim).trim();
+    if(live){
+      if(!activeTurnTrace||activeTurnTrace.finalized||activeTurnTrace.cancelled)beginTurnTrace('browser_asr');
+      markTurn('last_effective_voice');
+    }
     if(live&&live!==previous&&turnClosing&&!turnCommitSent)resumeAudioTurn();
     if(live) showPartial(live);
     if(live) armSilence();
@@ -1147,12 +1237,14 @@ async function finishTurn(force=false){
   showPartial('');
   if(usingFallback){ fbStop(); }
   if(!text){
+    cancelTurnTrace('no_transcript');
     const hint = micLastVoice
       ? '我听到你说话了，但识别没有出文字。请稍微靠近麦克风，再说一遍。'
       : '这句没有检测到有效声音。请确认浏览器麦克风权限，然后再说一遍。';
     listenAgain(hint);
     return;
   }
+  markTurn('asr_final_ready');
   phase='processing'; setHalo('thinking'); thinkingStartedAt=Date.now();
   /* 跟读评测：Jake 埋了目标句且这轮录到了足够音频（≥0.4秒），先打分再交给 Jake */
   const phrase=pendingEcho; pendingEcho=null;
@@ -1235,6 +1327,7 @@ function withLiveCoaching(messages){
 
 async function handleUserSpeech(text,displayText){
   if(!active)return;
+  if(!activeTurnTrace||activeTurnTrace.finalized||activeTurnTrace.cancelled)beginTurnTrace('transcript');
   addLine('user',displayText||text);
   phase='thinking'; thinkingStartedAt=Date.now(); setHalo('thinking'); setStatus('Jake 在想…'); interrupted=false; genDone=false; curEmotion=''; replySeg=0; gapFills=0;
   const replyVersion=interruptVersion;
@@ -1242,7 +1335,7 @@ async function handleUserSpeech(text,displayText){
   try{
     history.push({role:'user',content:text});
     if(history.length>40) history.splice(1,2);
-    const full=await chatStream(withLiveCoaching(history), s=>enqueueSpeech(s));
+    const full=await chatStream(withLiveCoaching(history), s=>enqueueSpeech(s), activeTurnTrace.id);
     if(replyVersion!==interruptVersion)return;
     genDone=true;
     if(full){history.push({role:'assistant',content:cleanForHistory(full)});
@@ -1352,6 +1445,8 @@ function withTimeout(promise,ms,name){
 }
 
 function resetCallRuntime(){
+  cancelTurnTrace('call_reset'); activeTurnTrace=null;
+  cancelFillerWarmup(); fillerWarmStarted=false; fillersReady=false; semanticHasPlayed=false;
   callGeneration++;
   clearInterval(tick); tick=null;
   clearTimeout(silenceTimer); silenceTimer=null;
@@ -1378,7 +1473,9 @@ async function startCall(){
   step(1,'接收地面简报 UPLINK…（最多15秒）');
   callLater(()=>{ try{ playEntranceSound(); }catch(e){} },50);  // 音效延后，绝不拖慢首屏反馈
   try{
-    await withTimeout(fetchLocal('/api/diag', null, '本地诊断接口'),5000,'本地诊断接口');
+    const diagResponse=await withTimeout(fetchLocal('/api/diag', null, '本地诊断接口'),5000,'本地诊断接口');
+    const diag=await diagResponse.json();
+    runtimeFeatures=Object.assign(runtimeFeatures,diag.features||{});
     let cards;
     try{
       const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),15000);
@@ -1397,7 +1494,7 @@ async function startCall(){
     /* 第3步：识别通道 */
     step(3,'连接识别通道…');
     active=true;
-    connectASR(); prepFillers();
+    connectASR();
     $('btnStart').style.display='none'; $('btnEnd').style.display='inline-block';
     $('timer').style.display='block';
     $('hint').innerHTML='全程不用碰电脑：他说完自动轮到你，你说完停顿片刻轮到他。他说太长？点头像打断。';
@@ -1433,6 +1530,8 @@ function startTimer(){
   },1000);
 }
 function cleanup(){
+  cancelTurnTrace('call_cleanup'); activeTurnTrace=null;
+  cancelFillerWarmup();
   fillGeneration++; interruptVersion++; callGeneration++;
   starting=false;
   clearInterval(tick); tick=null;
@@ -1451,7 +1550,7 @@ function cleanup(){
   turnClosing=false; turnCommitSent=false; pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0; speakingStartedAt=0; thinkingStartedAt=0;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
   engQ=null; engineFailures=[]; engineFailing=false;
-  ackBlobs=[]; fillerBlobs=[]; lastFiller=-1; lastAck=-1;
+  ackBlobs=[]; fillerBlobs=[]; fillersReady=false; lastFiller=-1; lastAck=-1;
   fbLang='zh-CN'; asrOk=false; asrAcceptingAudio=false; asrTries=0; earDiag('');
 }
 async function endCall(showReport){

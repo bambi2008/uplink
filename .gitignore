@@ -6,6 +6,7 @@ Thumbs.db
 local-settings*.json
 server-*.log
 server.*.log
+latency-logs/
 claude-export/
 briefings/
 .playwright-cli/

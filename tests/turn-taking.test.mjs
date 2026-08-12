@@ -17,6 +17,8 @@ function section(start,end){
 function makeContext(extra={}){
   return vm.createContext({
     console,Date,Math,Promise,TextDecoder,TextEncoder,
+    markTurn:()=>{},cancelTurnTrace:()=>{},beginTurnTrace:()=>({id:'test-turn'}),
+    cancelFillerWarmup:()=>{},
     ...extra,
   });
 }
@@ -288,6 +290,47 @@ function testStartLockPrecedesAsyncSetup(){
   assert.match(cleanupSource,/starting=false/);
 }
 
+function testChineseAndEnglishFirstSegmentsUseTurbo(){
+  const ctx=makeContext({runtimeFeatures:{low_latency:true}});
+  vm.runInContext(section('function firstSegmentTtsModel','function enqueueSpeech'),ctx);
+  assert.equal(ctx.firstSegmentTtsModel(true),'speech-2.8-turbo');
+  assert.equal(ctx.firstSegmentTtsModel(false),null);
+  ctx.runtimeFeatures.low_latency=false;
+  assert.equal(ctx.firstSegmentTtsModel(true),null);
+
+  const enqueueSource=section('function enqueueSpeech','async function prepFillers');
+  assert.doesNotMatch(enqueueSource,/hasCJK/);
+  assert.match(enqueueSource,/firstSegmentTtsModel\(isFirst\)/);
+}
+
+function testAcknowledgementIsNotSemanticFirstAudio(){
+  let now=100, posted=null;
+  const ctx=makeContext({
+    performance:{now:()=>now}, runtimeFeatures:{latency_trace:true}, turnTraceSequence:0,
+    fetch:async(path,options)=>{posted=JSON.parse(options.body);return {ok:true};},
+    console:{...console,info:()=>{}},
+  });
+  vm.runInContext(section('class TurnLatencyTrace','/* ---------- \u8bbe\u7f6e\u5f39\u7a97 ---------- */'),ctx);
+  const trace=vm.runInContext("new TurnLatencyTrace('microphone')",ctx);
+  now=200; trace.mark('last_effective_voice');
+  now=300; trace.mark('ack_audio_playing');
+  assert.equal(trace.finalized,false);
+  now=700; trace.mark('semantic_audio_playing',{tts_path:'blob'});
+  assert.equal(trace.finalized,true);
+  assert.equal(posted.semantic_first_audio_ms,500);
+  assert.equal(posted.stages_ms.ack_audio_playing,100);
+}
+
+function testFillerWarmupStaysOffCriticalStartupPath(){
+  const startSource=section('async function startCall','function startTimer');
+  assert.doesNotMatch(startSource,/connectASR\(\);\s*prepFillers\(\)/);
+  const queueSource=section('async function pumpQueue','/* \u64ad\u653e\u4e00\u6bb5\u8bed\u97f3');
+  assert.match(queueSource,/startListening\(\); scheduleFillerWarmup\(\)/);
+  const fillerSource=section('async function prepFillers','let lastFiller');
+  assert.match(fillerSource,/const acks=\['Mm-hm\.',\s*'Right\.',\s*'Got it\.'\]/);
+  assert.match(fillerSource,/const thinks=\['Hmm\.\.\.',\s*'\(emm\)'\]/);
+}
+
 async function testReconnectResetsRuntimeBeforeOpeningStream(){
   const cleared=[];
   const ctx=makeContext({
@@ -348,6 +391,9 @@ await testLateMicrophonePermissionCannotReplaceNewCall();
 await testScoringCannotResumeAfterHangup();
 await testResolvedTimeoutClearsItsTimer();
 testStartLockPrecedesAsyncSetup();
+testChineseAndEnglishFirstSegmentsUseTurbo();
+testAcknowledgementIsNotSemanticFirstAudio();
+testFillerWarmupStaysOffCriticalStartupPath();
 await testReconnectResetsRuntimeBeforeOpeningStream();
 
 console.log('turn-taking state tests passed');

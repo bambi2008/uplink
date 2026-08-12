@@ -32,6 +32,7 @@ import pathlib
 import contextlib
 import uuid
 import sys
+from collections import OrderedDict
 
 import aiohttp
 from aiohttp import web
@@ -62,6 +63,111 @@ CHAT_MODEL_FALLBACK = "MiniMax-M2.5-highspeed" # 若上者不可用自动回退
 TTS_MODEL = "speech-2.8-turbo"
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=50)
 SETTINGS_LOCK = asyncio.Lock()
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+LATENCY_TRACE = env_flag("UPLINK_LATENCY_TRACE", False)
+LOW_LATENCY = env_flag("UPLINK_LOW_LATENCY", True)
+FAST_EOT = env_flag("UPLINK_FAST_EOT", False)
+STREAM_TTS = env_flag("UPLINK_STREAM_TTS", False)
+CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
+    "UPLINK_CHAT_MODELS", "MiniMax-Text-01,MiniMax-M2.5-highspeed"
+).split(",") if model.strip())
+MODEL_NEGATIVE_TTL = 600.0
+MODEL_NEGATIVE_CACHE = {}
+HTTP_CLIENT_KEY = web.AppKey("uplink_http_client", aiohttp.ClientSession)
+TTS_CACHE = OrderedDict()
+TTS_CACHE_MAX = 32
+LATENCY_DIR = ROOT / "latency-logs"
+LATENCY_FILE = LATENCY_DIR / "latency.jsonl"
+LATENCY_LOCK = asyncio.Lock()
+
+
+def _safe_id(value, limit=96):
+    value = str(value or "")[:limit]
+    return "".join(ch for ch in value if ch.isalnum() or ch in "-_.:")
+
+
+def _sanitize_latency(value, depth=0):
+    if depth > 4:
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:160]
+    if isinstance(value, list):
+        return [_sanitize_latency(item, depth + 1) for item in value[:20]]
+    if isinstance(value, dict):
+        safe = {}
+        safe_audio_metrics = {"semantic_first_audio_ms", "ack_first_audio_ms", "audio_bytes"}
+        for key, item in list(value.items())[:40]:
+            key_text = str(key)[:64]
+            lowered = key_text.lower()
+            contains_secret = any(marker in lowered for marker in (
+                "key", "token", "secret", "authorization", "transcript", "message", "prompt", "pcm",
+            ))
+            contains_content = "text" in lowered or ("audio" in lowered and lowered not in safe_audio_metrics)
+            if contains_secret or contains_content:
+                continue
+            safe[key_text] = _sanitize_latency(item, depth + 1)
+        return safe
+    return str(type(value).__name__)
+
+
+async def record_latency(event):
+    if not LATENCY_TRACE:
+        return
+    safe = _sanitize_latency(event)
+    line = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
+    print("[latency] " + line, flush=True)
+    async with LATENCY_LOCK:
+        LATENCY_DIR.mkdir(exist_ok=True)
+        with LATENCY_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+
+async def http_client_context(app):
+    connector = aiohttp.TCPConnector(limit=20, limit_per_host=10, ttl_dns_cache=300,
+                                     keepalive_timeout=30)
+    app[HTTP_CLIENT_KEY] = aiohttp.ClientSession(
+        timeout=HTTP_TIMEOUT, connector=connector, trust_env=True
+    )
+    yield
+    await app[HTTP_CLIENT_KEY].close()
+
+
+def _model_failure_is_cacheable(status, detail):
+    if status not in {400, 404}:
+        return False
+    lowered = str(detail or "").lower()
+    mentions_model = "model" in lowered or "模型" in lowered
+    unavailable = any(marker in lowered for marker in (
+        "not found", "does not exist", "unsupported", "not available",
+        "invalid model", "unknown model", "不存在", "不支持", "不可用",
+    ))
+    return mentions_model and unavailable
+
+
+def _cache_model_failure(model, now=None):
+    MODEL_NEGATIVE_CACHE[model] = (now if now is not None else time.monotonic()) + MODEL_NEGATIVE_TTL
+
+
+def _chat_model_candidates(now=None):
+    current = now if now is not None else time.monotonic()
+    expired = [model for model, until in MODEL_NEGATIVE_CACHE.items() if until <= current]
+    for model in expired:
+        MODEL_NEGATIVE_CACHE.pop(model, None)
+    return [model for model in CHAT_MODELS if MODEL_NEGATIVE_CACHE.get(model, 0) <= current]
+
+
+def _http_client(req):
+    return req.app[HTTP_CLIENT_KEY]
 
 # MiniMax（对话+合成）
 ENV_KEY = os.environ.get("MINIMAX_API_KEY", "")
@@ -220,7 +326,7 @@ async def api_local_settings(req):
 
 # ----------------------------------------------------------------- 对话（流式）
 
-async def api_chat(req):
+async def _api_chat_legacy(req):
     try:
         body = await req.json()
     except Exception:
@@ -307,17 +413,177 @@ async def api_chat(req):
     return resp
 
 
+# P0 low-latency chat path. The legacy implementation above stays available for
+# a one-line rollback while this version is exercised in production.
+async def api_chat(req):
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
+    messages = body.get("messages", [])
+    if not isinstance(messages, list) or not messages:
+        return web.json_response({"error": "缺少对话内容"}, status=400)
+    key = key_from(req)
+    if not key:
+        return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
+
+    turn_id = _safe_id(body.get("turn_id"))
+    started = time.perf_counter()
+    session = _http_client(req)
+    upstream = None
+    selected_model = ""
+    failures = []
+    for model_try in _chat_model_candidates():
+        attempt_started = time.perf_counter()
+        try:
+            candidate = await session.post(
+                MINIMAX_BASE + "/v1/chat/completions",
+                headers={"Authorization": "Bearer " + key,
+                         "Content-Type": "application/json"},
+                json={"model": model_try, "temperature": 0.8,
+                      "stream": True, "messages": messages},
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            failures.append((model_try, 0, type(exc).__name__))
+            await record_latency({"source": "server", "type": "chat_model_attempt",
+                                  "turn_id": turn_id, "model": model_try, "status": 0,
+                                  "duration_ms": round((time.perf_counter() - attempt_started) * 1000, 1)})
+            continue
+        if candidate.status < 400:
+            upstream = candidate
+            selected_model = model_try
+            await record_latency({"source": "server", "type": "chat_model_selected",
+                                  "turn_id": turn_id, "model": model_try,
+                                  "duration_ms": round((time.perf_counter() - attempt_started) * 1000, 1)})
+            break
+        detail = (await candidate.text())[:500]
+        status = candidate.status
+        candidate.release()
+        cacheable = _model_failure_is_cacheable(status, detail)
+        failures.append((model_try, status, "upstream_rejected"))
+        if cacheable:
+            _cache_model_failure(model_try)
+        await record_latency({"source": "server", "type": "chat_model_attempt",
+                              "turn_id": turn_id, "model": model_try, "status": status,
+                              "cacheable": cacheable,
+                              "duration_ms": round((time.perf_counter() - attempt_started) * 1000, 1)})
+        if status in {401, 403}:
+            return web.json_response({
+                "error": "MiniMax 对话接口拒绝了当前 API Key，请检查对话 Key 的权限。"
+            }, status=502)
+
+    if upstream is None:
+        status_list = ", ".join(f"{model}:{status or 'network'}" for model, status, _ in failures)
+        await record_latency({"source": "server", "type": "chat_failed", "turn_id": turn_id,
+                              "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                              "attempt_count": len(failures)})
+        return web.json_response({
+            "error": "MiniMax 对话模型暂时不可用" + (f"（{status_list}）" if status_list else "")
+        }, status=502)
+
+    response = web.StreamResponse(headers={
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Uplink-Chat-Model": selected_model,
+    })
+    await response.prepare(req)
+    in_think = False
+    carry = ""
+    wrote_any = False
+    first_raw = False
+    first_speakable = False
+
+    def filter_think(text):
+        nonlocal in_think, carry
+        remaining = carry + text
+        carry = ""
+        output = []
+        while remaining:
+            if in_think:
+                end = remaining.find("</think>")
+                if end == -1:
+                    carry = remaining[-8:] if len(remaining) > 8 else remaining
+                    return "".join(output)
+                remaining = remaining[end + 8:]
+                in_think = False
+            else:
+                start = remaining.find("<think>")
+                if start == -1:
+                    tail = remaining[-7:]
+                    if "<" in tail:
+                        cut = remaining.rfind("<")
+                        output.append(remaining[:cut])
+                        carry = remaining[cut:]
+                        return "".join(output)
+                    output.append(remaining)
+                    return "".join(output)
+                output.append(remaining[:start])
+                remaining = remaining[start + 7:]
+                in_think = True
+        return "".join(output)
+
+    try:
+        async for raw_line in upstream.content:
+            line = raw_line.decode("utf-8", "ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            with contextlib.suppress(Exception):
+                delta = json.loads(data)["choices"][0]["delta"].get("content", "")
+                if not delta:
+                    continue
+                if not first_raw:
+                    first_raw = True
+                    await record_latency({"source": "server", "type": "chat_first_raw",
+                                          "turn_id": turn_id, "model": selected_model,
+                                          "duration_ms": round((time.perf_counter() - started) * 1000, 1)})
+                clean = filter_think(delta)
+                if clean:
+                    if not first_speakable:
+                        first_speakable = True
+                        await record_latency({"source": "server", "type": "chat_first_speakable",
+                                              "turn_id": turn_id, "model": selected_model,
+                                              "duration_ms": round((time.perf_counter() - started) * 1000, 1)})
+                    wrote_any = True
+                    await response.write(clean.encode("utf-8"))
+        if not wrote_any:
+            await response.write("\n[[ERROR]]对话模型没有返回可播放内容".encode("utf-8"))
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await response.write(("\n[[ERROR]]对话流中断：" + type(exc).__name__).encode("utf-8"))
+    finally:
+        upstream.release()
+        await record_latency({"source": "server", "type": "chat_complete", "turn_id": turn_id,
+                              "model": selected_model, "has_audio_text": wrote_any,
+                              "duration_ms": round((time.perf_counter() - started) * 1000, 1)})
+    with contextlib.suppress(ConnectionResetError, aiohttp.ClientConnectionError):
+        await response.write_eof()
+    return response
+
+
 # 非流式对话（生成谈资、复盘用）
-async def mm_chat_once(key, messages, temperature=0.7):
-    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT, trust_env=True) as s:
-        for model_try in (CHAT_MODEL, CHAT_MODEL_FALLBACK):
+async def mm_chat_once(key, messages, temperature=0.7, session=None):
+    own_session = session is None
+    s = session or aiohttp.ClientSession(timeout=HTTP_TIMEOUT, trust_env=True)
+    try:
+        for model_try in _chat_model_candidates():
             payload = {"model": model_try, "temperature": temperature, "messages": messages}
             try:
                 async with s.post(MINIMAX_BASE + "/v1/chat/completions",
                                   headers={"Authorization": "Bearer " + key,
                                            "Content-Type": "application/json"},
                                   json=payload) as r:
-                    j = await r.json()
+                    detail = await r.text()
+                    if r.status in {401, 403}:
+                        return ""
+                    if _model_failure_is_cacheable(r.status, detail):
+                        _cache_model_failure(model_try)
+                    if r.status >= 400:
+                        continue
+                    j = json.loads(detail)
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 continue
             try:
@@ -326,12 +592,15 @@ async def mm_chat_once(key, messages, temperature=0.7):
                 continue  # 该模型不可用，换下一个
             import re
             return re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
-    return ""
+        return ""
+    finally:
+        if own_session:
+            await s.close()
 
 
 # ----------------------------------------------------------------- 语音合成
 
-async def api_tts(req):
+async def _api_tts_legacy(req):
     try:
         body = await req.json()
     except Exception:
@@ -381,6 +650,87 @@ async def api_tts(req):
         return web.json_response({"error": str(base_resp or j)[:200]}, status=502)
     audio = bytes.fromhex(hexaudio)
     return web.Response(body=audio, content_type="audio/mpeg")
+
+
+async def api_tts(req):
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "请求体必须是 JSON 对象"}, status=400)
+    auth = req.headers.get("Authorization", "")
+    supplied = auth[7:].strip() if isinstance(auth, str) and auth.lower().startswith("bearer ") else ""
+    supplied = supplied or (req.headers.get("X-MM-Key") or "").strip()
+    saved = _read_local_settings()
+    key = supplied or saved.get("mm_tts_key", "") or saved.get("mm_key", "") or ENV_KEY
+    group = group_from(req)
+    if not key:
+        return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "缺少要合成的文字"}, status=400)
+
+    voice_setting = {"voice_id": body.get("voice", "English_magnetic_voiced_man"),
+                     "speed": body.get("speed", 1.0)}
+    if body.get("emotion"):
+        voice_setting["emotion"] = body["emotion"]
+    tts_model = body.get("model") or TTS_MODEL
+    lang_boost = body.get("language_boost") or "auto"
+    purpose = str(body.get("purpose") or "semantic")
+    turn_id = _safe_id(body.get("turn_id"))
+    started = time.perf_counter()
+    cacheable = purpose in {"ack", "filler"}
+    cache_key = (voice_setting["voice_id"], tts_model, voice_setting["speed"],
+                 voice_setting.get("emotion", ""), lang_boost, text)
+    if cacheable and cache_key in TTS_CACHE:
+        audio = TTS_CACHE.pop(cache_key)
+        TTS_CACHE[cache_key] = audio
+        await record_latency({"source": "server", "type": "tts_cache_hit", "turn_id": turn_id,
+                              "purpose": purpose, "model": tts_model, "audio_bytes": len(audio)})
+        return web.Response(body=audio, content_type="audio/mpeg",
+                            headers={"X-Uplink-TTS-Cache": "hit"})
+
+    url = MINIMAX_BASE + "/v1/t2a_v2" + (("?GroupId=" + group) if group else "")
+    payload = {"model": tts_model, "text": text, "stream": False,
+               "voice_setting": voice_setting, "language_boost": lang_boost,
+               "audio_setting": {"format": "mp3"}}
+    try:
+        async with _http_client(req).post(
+            url, headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+            json=payload,
+        ) as response:
+            if response.status in {401, 403}:
+                return web.json_response({
+                    "error": "MiniMax 语音接口拒绝了当前语音 API Key，请检查语音权限。"
+                }, status=502)
+            result = await response.json()
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "MiniMax 语音接口超时，请稍后重试"}, status=504)
+    except aiohttp.ClientError as exc:
+        return web.json_response({"error": f"MiniMax 语音接口连接失败：{str(exc)[:120]}"}, status=502)
+
+    hexaudio = (result.get("data") or {}).get("audio")
+    if not hexaudio:
+        base_resp = result.get("base_resp") or {}
+        if base_resp.get("status_code") == 1004:
+            return web.json_response({
+                "error": "MiniMax 语音接口拒绝了当前 Key（1004）。请在通讯设置填写可调用语音的 API Key；聊天 Key 可以继续保留。"
+            }, status=502)
+        return web.json_response({"error": str(base_resp or result)[:200]}, status=502)
+    try:
+        audio = bytes.fromhex(hexaudio)
+    except ValueError:
+        return web.json_response({"error": "MiniMax 语音接口返回了无效音频"}, status=502)
+    if cacheable:
+        TTS_CACHE[cache_key] = audio
+        while len(TTS_CACHE) > TTS_CACHE_MAX:
+            TTS_CACHE.popitem(last=False)
+    await record_latency({"source": "server", "type": "tts_complete", "turn_id": turn_id,
+                          "purpose": purpose, "model": tts_model, "audio_bytes": len(audio),
+                          "duration_ms": round((time.perf_counter() - started) * 1000, 1)})
+    return web.Response(body=audio, content_type="audio/mpeg",
+                        headers={"X-Uplink-TTS-Cache": "miss" if cacheable else "off"})
 
 
 # ----------------------------------------------------------------- 实时识别中转
@@ -589,7 +939,7 @@ async def api_briefing(req):
     try:
         cards = await asyncio.wait_for(
             mm_chat_once(key, [{"role": "system", "content": CARDS_SYSTEM},
-                               {"role": "user", "content": user}], 0.9),
+                               {"role": "user", "content": user}], 0.9, _http_client(req)),
             timeout=20)
     except Exception:
         return web.json_response({"cards": FALLBACK_CARDS})
@@ -648,7 +998,7 @@ async def api_report(req):
     try:
         rep = await asyncio.wait_for(
             mm_chat_once(key, [{"role": "system", "content": REPORT_SYSTEM},
-                               {"role": "user", "content": convo}], 0.6),
+                               {"role": "user", "content": convo}], 0.6, _http_client(req)),
             timeout=55,
         )
     except asyncio.TimeoutError:
@@ -660,7 +1010,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-06.lifecycle-stability-1"
+BUILD = "2026-08-12.low-latency-p0-pr1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -805,7 +1155,25 @@ async def api_ise(req):
 async def api_diag(req):
     """让前端确认：server 是新版、doubao 模块是否加载成功。"""
     return web.json_response({"app": "uplink", "build": BUILD, "pid": os.getpid(),
-                              "doubao_loaded": _DB_OK, "doubao_error": _DB_ERR})
+                              "doubao_loaded": _DB_OK, "doubao_error": _DB_ERR,
+                              "features": {"latency_trace": LATENCY_TRACE,
+                                           "low_latency": LOW_LATENCY,
+                                           "fast_eot": FAST_EOT,
+                                           "stream_tts": STREAM_TTS},
+                              "chat_models": list(CHAT_MODELS)})
+
+
+async def api_latency(req):
+    if not LATENCY_TRACE:
+        return web.Response(status=204)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "event must be an object"}, status=400)
+    await record_latency({"source": "browser", **body, "received_at": time.time()})
+    return web.Response(status=204)
 
 
 async def api_asr_test(req):
@@ -888,6 +1256,7 @@ async def api_asr_test(req):
 
 def make_app():
     app = web.Application(client_max_size=1024 * 1024 * 8)
+    app.cleanup_ctx.append(http_client_context)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_get("/ws/asr", ws_asr)
@@ -901,8 +1270,9 @@ def make_app():
     app.router.add_post("/api/local_settings", api_local_settings)
     app.router.add_get("/api/asr_test", api_asr_test)
     app.router.add_post("/api/ise", api_ise)
-    app.router.add_post("/api/chat", api_chat)
-    app.router.add_post("/api/tts", api_tts)
+    app.router.add_post("/api/chat", api_chat if LOW_LATENCY else _api_chat_legacy)
+    app.router.add_post("/api/tts", api_tts if LOW_LATENCY else _api_tts_legacy)
+    app.router.add_post("/api/latency", api_latency)
     app.router.add_post("/api/briefing", api_briefing)
     app.router.add_post("/api/report", api_report)
     app.router.add_static("/static/", STATIC)
