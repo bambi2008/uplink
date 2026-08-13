@@ -74,7 +74,7 @@ def env_flag(name, default=False):
 
 LATENCY_TRACE = env_flag("UPLINK_LATENCY_TRACE", False)
 LOW_LATENCY = env_flag("UPLINK_LOW_LATENCY", True)
-FAST_EOT = env_flag("UPLINK_FAST_EOT", False)
+FAST_EOT = env_flag("UPLINK_FAST_EOT", True)
 STREAM_TTS = env_flag("UPLINK_STREAM_TTS", False)
 CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
     "UPLINK_CHAT_MODELS", "MiniMax-Text-01,MiniMax-M2.5-highspeed"
@@ -1010,7 +1010,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-12.low-latency-p0-pr1"
+BUILD = "2026-08-12.low-latency-p0-pr2"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 

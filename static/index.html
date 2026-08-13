@@ -449,6 +449,35 @@ async function asrTest(){
 }
 function paceMs(){return {fast:450,normal:600,calm:1000}[sGet('mm_pace')||'normal']||600}
 function pauseGraceMs(){return {fast:650,normal:950,calm:1450}[sGet('mm_pace')||'normal']||950}
+function classifyTurnCompletion(text){
+  let value=String(text||'').trim();
+  if(!value)return 'likely_incomplete';
+  value=value.replace(/["')\]」』】]+$/,'').trim();
+  const lower=value.toLowerCase().replace(/[,.!?;:]+$/,'').trim();
+  const englishTail=/(?:\b(?:and|but|because|so|if|when|which|that|to|of|for|with|about|as|a|an|the|is|are|was|were|have|has|had|will|would|can|could|should)|\b(?:focus(?:es|ed|ing)? on|reason is because|talk about|developing a))$/i;
+  const englishLead=/^(?:because|although|unless|while|if|when)\b/i;
+  const chineseTail=/(?:因为|所以|但是|然后|就是|比如|关于|跟|和|在|把|让|需要|想|希望|会|是|的)$/;
+  if(englishTail.test(lower)||englishLead.test(lower)||chineseTail.test(value))return 'likely_incomplete';
+  if(/[.!?。！？]$/.test(value)&&value.length>=4)return 'strong_complete';
+  return 'neutral';
+}
+function computeTurnCommitDelay({paceMode,completionClass,asrIsFinal,msSinceLastAsrUpdate}){
+  const table={
+    fast:{strong_complete:280,neutral:420,likely_incomplete:1000},
+    normal:{strong_complete:350,neutral:550,likely_incomplete:1300},
+    calm:{strong_complete:550,neutral:800,likely_incomplete:1700},
+  };
+  const pace=table[paceMode]||table.normal;
+  let delay=pace[completionClass]||pace.neutral;
+  if(!asrIsFinal&&completionClass!=='likely_incomplete')delay+=100;
+  const asrAge=Math.max(0,Number(msSinceLastAsrUpdate)||0);
+  return Math.max(delay,Math.max(0,90-asrAge));
+}
+function computeAsrFlushDelay({hasFinal,hasPartial,heardVoice}){
+  if(hasFinal)return 60;
+  if(hasPartial)return 220;
+  return heardVoice?650:0;
+}
 function seaTick(){$('seaTime').textContent=new Date().toLocaleTimeString('en-US',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit'})}
 seaTick();setInterval(seaTick,30000);
 const setStatus=t=>$('status').innerHTML=t;
@@ -556,7 +585,7 @@ let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
 let callAbort=null, fillGeneration=0, interruptVersion=0, callGeneration=0;
 let fillerAbort=null, fillerWarmStarted=false, fillersReady=false, semanticHasPlayed=false;
-let runtimeFeatures={latency_trace:false,low_latency:true,fast_eot:false,stream_tts:false};
+let runtimeFeatures={latency_trace:false,low_latency:true,fast_eot:true,stream_tts:false};
 let activeTurnTrace=null, turnTraceSequence=0;
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
@@ -891,9 +920,17 @@ $('haloWrap').onclick=()=>interruptJakeForUser('manual',[]);
 /* ---------- 麦克风 → 后端 WebSocket 识别 ---------- */
 let micPipeOk=false;   // WebAudio采集管线是否可用（不可用则必须走备用识别）
 let micWatch=null, micSilenceTimer=null, micLastVoice=0, asrLastText=0, micLevel=0, micFrames=0, listenStartedAt=0, noTextPromptAt=0, turnClosing=false, asrRestarting=false, micNoiseFloor=0.003, micSpeechStarted=false;
-let turnCommitTimer=null, turnCommitSent=false, thinkingStartedAt=0;
+let turnCommitTimer=null, turnCommitSent=false, turnFinishStarted=false, thinkingStartedAt=0;
+let lastAsrUpdateAt=0, lastAsrFinalAt=0, lastAsrWasFinal=false, lastVoiceActivityAt=0, lastInterimText='', eotCandidateAt=0;
 let speakingStartedAt=0, bargeFrames=0, bargePreRoll=[], bargeNoiseFloor=0.003, pendingPreRoll=[];
 function earDiag(t){ const e=$('earDiag'); if(e)e.innerHTML=t||''; }
+function noteAsrUpdate(text,isFinal){
+  const now=Date.now();
+  lastAsrUpdateAt=now; lastAsrWasFinal=!!isFinal;
+  if(isFinal){lastAsrFinalAt=now;lastInterimText='';}
+  else lastInterimText=String(text||'');
+  if(runtimeFeatures.fast_eot&&turnClosing&&!turnCommitSent)scheduleTurnCommit();
+}
 function keepPreRoll(i16,limit){
   pendingPreRoll.push(i16.slice());
   while(pendingPreRoll.length>(limit||6))pendingPreRoll.shift();
@@ -970,7 +1007,7 @@ async function openMic(){
       if(micLevel>voiceThreshold){
         if(turnClosing&&!turnCommitSent)resumeAudioTurn();
         if(!micSpeechStarted)beginTurnTrace('microphone');
-        micLastVoice=Date.now();
+        micLastVoice=Date.now(); lastVoiceActivityAt=micLastVoice;
         micSpeechStarted=true;
         markTurn('last_effective_voice');
         armMicSilence();
@@ -1050,8 +1087,8 @@ function connectASR(){
     if(d.type==='asr' && phase==='listening'){
       asrLastText=Date.now();
       earDiag('耳朵 · 已识别到文字');
-      if(d.final){ finals+=d.text+' '; showPartial(''); armSilence(Math.min(350,paceMs())); }
-      else { showPartial(d.text); armSilence(); }
+      if(d.final){ finals+=d.text+' '; showPartial(''); noteAsrUpdate(d.text,true); armSilence(Math.min(350,paceMs())); }
+      else { showPartial(d.text); noteAsrUpdate(d.text,false); armSilence(); }
     }
   };
   ws.onclose=()=>{
@@ -1079,41 +1116,68 @@ function restartASR(reason){
 
 function armMicSilence(){
   clearTimeout(micSilenceTimer);
-  micSilenceTimer=setTimeout(closeAudioTurn, Math.max(650, paceMs()));
+  const delay=runtimeFeatures.fast_eot?Math.max(180,Math.min(320,paceMs()/2)):Math.max(650,paceMs());
+  micSilenceTimer=setTimeout(closeAudioTurn,delay);
 }
 
 function closeAudioTurn(){
   if(turnClosing||phase!=='listening') return;
   turnClosing=true; turnCommitSent=false;
+  eotCandidateAt=Date.now();
   markTurn('eot_candidate');
   clearTimeout(turnCommitTimer);
   earDiag('麦克风 · 听到停顿，再等你一拍…');
   setStatus('Jake 在等你把这句话说完…');
-  turnCommitTimer=setTimeout(commitAudioTurn,pauseGraceMs());
+  if(runtimeFeatures.fast_eot)scheduleTurnCommit();
+  else turnCommitTimer=setTimeout(commitAudioTurn,pauseGraceMs());
+}
+
+function currentTurnText(){
+  const finalText=finals.trim(), partialText=lastPartial.trim();
+  return partialText.length>finalText.length?partialText:finalText;
+}
+function scheduleTurnCommit(){
+  if(!turnClosing||turnCommitSent||phase!=='listening')return;
+  clearTimeout(turnCommitTimer);
+  const now=Date.now(), text=currentTurnText();
+  const completionClass=classifyTurnCompletion(text);
+  const delay=computeTurnCommitDelay({paceMode:sGet('mm_pace')||'normal',completionClass,
+    asrIsFinal:lastAsrWasFinal,msSinceLastAsrUpdate:lastAsrUpdateAt?now-lastAsrUpdateAt:Infinity});
+  const elapsed=Math.max(0,now-eotCandidateAt);
+  turnCommitTimer=setTimeout(commitAudioTurn,Math.max(0,delay-elapsed));
 }
 
 function resumeAudioTurn(){
   if(!turnClosing||turnCommitSent||phase!=='listening')return;
-  clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false;
+  clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false; eotCandidateAt=0;
   earDiag('麦克风 · 听到你继续说，保持聆听');
   setStatus('你还在说 · Jake 继续等');
 }
 
 function commitAudioTurn(){
-  if(!turnClosing||phase!=='listening')return;
+  if(!turnClosing||turnCommitSent||turnFinishStarted||phase!=='listening')return;
   turnCommitSent=true;
   markTurn('eot_commit');
   earDiag('麦克风 · 停顿确认，正在结算这一句…');
   if(usingFallback) fbStop();
   try{ if(asrWS&&asrWS.readyState===1){asrAcceptingAudio=false;asrWS.send('stop');} }catch{}
   clearTimeout(turnCommitTimer);
-  const flushWait=(finals.trim()||lastPartial.trim())?500:1400;
-  turnCommitTimer=setTimeout(()=>{turnCommitTimer=null;finishTurn(true);},flushWait);
+  const flushWait=runtimeFeatures.fast_eot
+    ?computeAsrFlushDelay({hasFinal:!!finals.trim()&&lastAsrWasFinal,
+                           hasPartial:!!currentTurnText(),heardVoice:!!lastVoiceActivityAt})
+    :((finals.trim()||lastPartial.trim())?500:1400);
+  turnCommitTimer=setTimeout(()=>{
+    turnCommitTimer=null;
+    if(turnFinishStarted||phase!=='listening')return;
+    turnFinishStarted=true;
+    finishTurn(true);
+  },flushWait);
 }
 
 function startMicWatch(){
   clearInterval(micWatch); clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null;
-  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); noTextPromptAt=0; turnClosing=false; turnCommitSent=false; asrRestarting=false; micNoiseFloor=0.003; micSpeechStarted=false;
+  micLastVoice=0; asrLastText=Date.now(); micFrames=0; listenStartedAt=Date.now(); noTextPromptAt=0; turnClosing=false; turnCommitSent=false; turnFinishStarted=false; asrRestarting=false; micNoiseFloor=0.003; micSpeechStarted=false;
+  lastAsrUpdateAt=0; lastAsrFinalAt=0; lastAsrWasFinal=false; lastVoiceActivityAt=0; lastInterimText=''; eotCandidateAt=0;
   earDiag('现在轮到你说 · 中文英文都可以');
   micWatch=setInterval(()=>{
     if(!active||phase!=='listening'||usingFallback||turnClosing) return;
@@ -1177,9 +1241,9 @@ function fbStart(){
     if(phase!=='listening') return;
     asrLastText=Date.now(); earDiag('耳朵 · 浏览器识别到文字');
     const previous=lastPartial.trim();
-    let interim='';
+    let interim='', sawFinal=false;
     for(let i=e.resultIndex;i<e.results.length;i++){
-      if(e.results[i].isFinal){ finals+=e.results[i][0].transcript+' '; }
+      if(e.results[i].isFinal){ finals+=e.results[i][0].transcript+' '; sawFinal=true; }
       else interim+=e.results[i][0].transcript;
     }
     const live=(finals+interim).trim();
@@ -1189,6 +1253,7 @@ function fbStart(){
     }
     if(live&&live!==previous&&turnClosing&&!turnCommitSent)resumeAudioTurn();
     if(live) showPartial(live);
+    if(live)noteAsrUpdate(interim||live,(sawFinal||!!finals.trim())&&!interim);
     if(live) armSilence();
   };
   fbRec.onend=()=>{
@@ -1217,10 +1282,12 @@ function showPartial(t){
 }
 function armSilence(ms){
   clearTimeout(silenceTimer);
-  silenceTimer=setTimeout(()=>{ if(phase==='listening') closeAudioTurn(); },Math.max(650,ms||paceMs()));
+  const requested=ms||paceMs();
+  const delay=runtimeFeatures.fast_eot?Math.max(180,Math.min(320,requested)):Math.max(650,requested);
+  silenceTimer=setTimeout(()=>{ if(phase==='listening') closeAudioTurn(); },delay);
 }
 function listenAgain(msg){
-  clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false; turnCommitSent=false;
+  clearTimeout(micSilenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null; turnClosing=false; turnCommitSent=false; turnFinishStarted=false;
   pendingEcho=null; echoChunks=[]; finals=''; lastPartial=''; showPartial('');
   if(active){ setStatus(msg||'这句没听清，再说一遍就行。'); startListening(); }
 }
@@ -1457,7 +1524,8 @@ function resetCallRuntime(){
   finals=''; lastPartial=''; partialEl=null; echoChunks=[];
   pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0;
   thinkingStartedAt=0; speakingStartedAt=0;
-  turnClosing=false; turnCommitSent=false; asrRestarting=false; engineFailing=false;
+  turnClosing=false; turnCommitSent=false; turnFinishStarted=false; asrRestarting=false; engineFailing=false;
+  lastAsrUpdateAt=0; lastAsrFinalAt=0; lastAsrWasFinal=false; lastVoiceActivityAt=0; lastInterimText=''; eotCandidateAt=0;
 }
 
 async function startCall(){
@@ -1547,7 +1615,7 @@ function cleanup(){
   try{if(asrWS){asrWS.onclose=null;asrWS.close();}}catch{}
   try{if(fbRec){fbRec.onresult=null;fbRec.onerror=null;fbRec.onend=null;fbRec.abort();}}catch{}
   clearInterval(fbWatch); fbWatch=null; clearInterval(micWatch); micWatch=null; clearTimeout(micSilenceTimer); clearTimeout(silenceTimer); clearTimeout(turnCommitTimer); turnCommitTimer=null;
-  turnClosing=false; turnCommitSent=false; pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0; speakingStartedAt=0; thinkingStartedAt=0;
+  turnClosing=false; turnCommitSent=false; turnFinishStarted=false; pendingPreRoll=[]; bargePreRoll=[]; bargeFrames=0; speakingStartedAt=0; thinkingStartedAt=0;
   micNode=micSource=micSink=audioCtx=micStream=asrWS=fbRec=null; usingFallback=false; fbActive=false;
   engQ=null; engineFailures=[]; engineFailing=false;
   ackBlobs=[]; fillerBlobs=[]; fillersReady=false; lastFiller=-1; lastAck=-1;

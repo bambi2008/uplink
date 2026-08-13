@@ -44,8 +44,10 @@ function testPauseCanResume(){
   const ctx=makeContext({
     ...timers,
     sGet:()=> 'normal', phase:'listening', turnClosing:false,
-    turnCommitSent:false, turnCommitTimer:null, usingFallback:false,
+    turnCommitSent:false, turnFinishStarted:false, turnCommitTimer:null, usingFallback:false,
     finals:'recognized words', lastPartial:'', asrWS:null,
+    runtimeFeatures:{fast_eot:true}, lastAsrWasFinal:true, lastAsrUpdateAt:Date.now(),
+    lastVoiceActivityAt:Date.now(), eotCandidateAt:0,
     earDiag:()=>{}, setStatus:()=>{}, fbStop:()=>{},
     finishTurn:()=>{finished++;},
   });
@@ -54,17 +56,135 @@ function testPauseCanResume(){
 
   ctx.closeAudioTurn();
   assert.equal(ctx.turnClosing,true);
-  assert.equal([...timers.tasks.values()][0].delay,950);
+  assert.ok([...timers.tasks.values()][0].delay<=550);
 
   ctx.resumeAudioTurn();
   assert.equal(ctx.turnClosing,false);
   assert.equal(timers.tasks.size,0);
 
   ctx.closeAudioTurn();
-  timers.runDelay(950);
+  const commitDelay=[...timers.tasks.values()][0].delay;
+  timers.runDelay(commitDelay);
   assert.equal(ctx.turnCommitSent,true);
-  timers.runDelay(500);
+  timers.runDelay(60);
   assert.equal(finished,1);
+}
+
+function testTurnCompletionClassificationAndDelays(){
+  const ctx=makeContext();
+  vm.runInContext(section('function classifyTurnCompletion','function seaTick'),ctx);
+
+  assert.equal(ctx.classifyTurnCompletion('I travel to Hong Kong twice a week.'),'strong_complete');
+  assert.equal(ctx.classifyTurnCompletion('My company makes smart gardening products'),'neutral');
+  for(const value of ['The reason is because','I agree and','I want to','We are developing a']){
+    assert.equal(ctx.classifyTurnCompletion(value),'likely_incomplete',value);
+  }
+  for(const value of ['因为我们现在','然后下一步我们会','我主要想说的是']){
+    assert.equal(ctx.classifyTurnCompletion(value),'likely_incomplete',value);
+  }
+  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'strong_complete',asrIsFinal:true,msSinceLastAsrUpdate:200}),350);
+  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'neutral',asrIsFinal:true,msSinceLastAsrUpdate:200}),550);
+  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'likely_incomplete',asrIsFinal:false,msSinceLastAsrUpdate:200}),1300);
+  assert.equal(ctx.computeAsrFlushDelay({hasFinal:true,hasPartial:true,heardVoice:true}),60);
+  assert.equal(ctx.computeAsrFlushDelay({hasFinal:false,hasPartial:true,heardVoice:true}),220);
+  assert.equal(ctx.computeAsrFlushDelay({hasFinal:false,hasPartial:false,heardVoice:true}),650);
+}
+
+function testFastEotCommitsOnlyOnce(){
+  const timers=makeTimers();
+  let finished=0;
+  const ctx=makeContext({
+    ...timers, phase:'listening', turnClosing:true, turnCommitSent:false,turnFinishStarted:false,
+    turnCommitTimer:null, usingFallback:false, finals:'That is the reason.',lastPartial:'',
+    lastAsrWasFinal:true,lastVoiceActivityAt:1,asrWS:null,
+    runtimeFeatures:{fast_eot:true},
+    computeAsrFlushDelay:({hasFinal,hasPartial,heardVoice})=>hasFinal?60:hasPartial?220:heardVoice?650:0,
+    earDiag:()=>{},fbStop:()=>{},finishTurn:()=>{finished++;},
+  });
+  vm.runInContext(section('function armMicSilence','function startMicWatch'),ctx);
+  ctx.commitAudioTurn();
+  ctx.commitAudioTurn();
+  assert.equal(timers.tasks.size,1);
+  timers.runDelay(60);
+  assert.equal(finished,1);
+  ctx.commitAudioTurn();
+  assert.equal(finished,1);
+}
+
+function testAsrUpdateReschedulesPendingCommit(){
+  const timers=makeTimers();
+  const ctx=makeContext({
+    ...timers,Date,phase:'listening',turnClosing:true,turnCommitSent:false,turnFinishStarted:false,
+    turnCommitTimer:null,eotCandidateAt:Date.now(),finals:'The reason is because ',lastPartial:'',
+    lastAsrWasFinal:true,lastAsrUpdateAt:Date.now(),sGet:()=> 'normal',runtimeFeatures:{fast_eot:true},
+    earDiag:()=>{},setStatus:()=>{},usingFallback:false,asrWS:null,markTurn:()=>{},
+  });
+  vm.runInContext(section('function classifyTurnCompletion','function seaTick'),ctx);
+  vm.runInContext(section('function earDiag','function keepPreRoll'),ctx);
+  vm.runInContext(section('function armMicSilence','function startMicWatch'),ctx);
+  ctx.scheduleTurnCommit();
+  const first=[...timers.tasks.values()][0].delay;
+  assert.ok(first>1000);
+  ctx.finals='We work with overseas clients. ';
+  ctx.noteAsrUpdate('We work with overseas clients.',true);
+  assert.equal(timers.tasks.size,1);
+  const second=[...timers.tasks.values()][0].delay;
+  assert.ok(second<=350);
+}
+
+function testFastEotFlagRestoresLegacyTiming(){
+  const timers=makeTimers();
+  const ctx=makeContext({
+    ...timers,sGet:()=> 'normal',phase:'listening',turnClosing:false,turnCommitSent:false,
+    turnFinishStarted:false,turnCommitTimer:null,runtimeFeatures:{fast_eot:false},
+    pauseGraceMs:()=>950,
+    finals:'Legacy sentence',lastPartial:'',usingFallback:false,asrWS:null,
+    earDiag:()=>{},setStatus:()=>{},fbStop:()=>{},finishTurn:()=>{},
+  });
+  vm.runInContext(section('function armMicSilence','function startMicWatch'),ctx);
+  ctx.closeAudioTurn();
+  assert.equal([...timers.tasks.values()][0].delay,950);
+  timers.runDelay(950);
+  assert.equal([...timers.tasks.values()][0].delay,500);
+}
+
+function testFallbackAsrUpdatesUnifiedState(){
+  const source=section('function fbStart','function fbStop');
+  assert.match(source,/noteAsrUpdate\(interim\|\|live,\(sawFinal\|\|!!finals\.trim\(\)\)&&!interim\)/);
+  assert.match(source,/if\(live&&live!==previous&&turnClosing&&!turnCommitSent\)resumeAudioTurn\(\)/);
+}
+
+function testThirtyUtteranceEotPolicyCorpus(){
+  const ctx=makeContext();
+  vm.runInContext(section('function classifyTurnCompletion','function seaTick'),ctx);
+  const shortComplete=[
+    'That makes sense.','I agree with you.','It was really helpful.','I work in Shenzhen.',
+    'My daughter loves it.','We finished it yesterday.','I prefer the first one.',
+    'The meeting starts tomorrow.','I have already tried it.','我下周要去香港见客户。',
+  ];
+  const mediumComplete=[
+    'My company makes smart gardening products for small apartments',
+    'I travel to Hong Kong twice a week for client meetings',
+    'We are building a modular system that is easier to maintain',
+    'The main reason is that our overseas clients asked for it',
+    'I started learning English because I want to speak more naturally',
+    'Our team tested the new design with three different customers',
+    'I usually think for a moment before I finish a long sentence',
+    'The product is useful for people who do not have a large garden',
+    'We changed the plan after receiving feedback from the sales team',
+    '我想用更自然的英语向海外客户介绍我们的产品',
+  ];
+  const pausePrefixes=[
+    'My company mainly focuses on','The reason is because','We are currently developing a',
+    'I would like to talk about','Our next product will','The customer asked for',
+    'We have been working with','The most difficult part is','因为我们现在','然后下一步我们会',
+  ];
+  assert.equal(shortComplete.length+mediumComplete.length+pausePrefixes.length,30);
+  assert.ok(shortComplete.every(value=>ctx.classifyTurnCompletion(value)==='strong_complete'));
+  assert.ok(mediumComplete.every(value=>ctx.classifyTurnCompletion(value)!=='likely_incomplete'));
+  assert.ok(pausePrefixes.every(value=>ctx.classifyTurnCompletion(value)==='likely_incomplete'));
+  const strongTotal=300+ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'strong_complete',asrIsFinal:true,msSinceLastAsrUpdate:200});
+  assert.ok(strongTotal<=700);
 }
 
 function testVoiceTakeoverNeedsSustainedSpeech(){
@@ -379,6 +499,12 @@ async function testReconnectResetsRuntimeBeforeOpeningStream(){
 }
 
 testPauseCanResume();
+testTurnCompletionClassificationAndDelays();
+testFastEotCommitsOnlyOnce();
+testAsrUpdateReschedulesPendingCommit();
+testFastEotFlagRestoresLegacyTiming();
+testFallbackAsrUpdatesUnifiedState();
+testThirtyUtteranceEotPolicyCorpus();
 testVoiceTakeoverNeedsSustainedSpeech();
 testInterruptInvalidatesOldWork();
 testLiveCoachingPromptIsEphemeral();
