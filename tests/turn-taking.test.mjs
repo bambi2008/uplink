@@ -17,8 +17,9 @@ function section(start,end){
 function makeContext(extra={}){
   return vm.createContext({
     console,Date,Math,Promise,TextDecoder,TextEncoder,
-    markTurn:()=>{},cancelTurnTrace:()=>{},beginTurnTrace:()=>({id:'test-turn'}),
+    markTurn:()=>{},markTurnOnce:()=>{},cancelTurnTrace:()=>{},beginTurnTrace:()=>({id:'test-turn'}),
     cancelFillerWarmup:()=>{},
+    streamingReply:null,
     ...extra,
   });
 }
@@ -187,6 +188,180 @@ function testThirtyUtteranceEotPolicyCorpus(){
   assert.ok(strongTotal<=700);
 }
 
+function streamingPlayerContext(){
+  class FakeSourceBuffer{
+    constructor(){this.updating=false;this.appended=[];this.listeners={};}
+    addEventListener(name,fn){this.listeners[name]=fn;}
+    appendBuffer(buffer){this.appended.push(buffer);this.updating=true;}
+    finishAppend(){this.updating=false;if(this.listeners.updateend)this.listeners.updateend();}
+  }
+  class FakeMediaSource{
+    static isTypeSupported(type){return type==='audio/mpeg';}
+    constructor(){this.readyState='closed';this.listeners={};this.buffer=new FakeSourceBuffer();this.ended=0;}
+    addEventListener(name,fn){this.listeners[name]=fn;}
+    addSourceBuffer(type){assert.equal(type,'audio/mpeg');return this.buffer;}
+    open(){this.readyState='open';this.listeners.sourceopen();}
+    endOfStream(){this.ended++;this.readyState='ended';}
+  }
+  class FakeAudio{
+    constructor(){this.paused=true;this.playCalls=0;}
+    play(){this.playCalls++;this.paused=false;return Promise.resolve();}
+    pause(){this.paused=true;}
+  }
+  class FakeWebSocket{
+    static OPEN=1;
+    constructor(){this.readyState=0;this.sent=[];}
+    send(value){this.sent.push(JSON.parse(value));}
+    close(){this.readyState=3;}
+  }
+  const ctx=makeContext({
+    MediaSource:FakeMediaSource,Audio:FakeAudio,WebSocket:FakeWebSocket,Blob:class {},
+    URL:{createObjectURL:()=> 'blob:test',revokeObjectURL:()=>{}},
+    location:{protocol:'http:',host:'127.0.0.1:8800'},performance:{now:()=>100},
+    setTimeout:()=>1,clearTimeout:()=>{},interruptVersion:3,active:true,
+    playing:false,playbackOwner:-1,curAudio:null,audioUnlocked:true,semanticHasPlayed:false,
+    speakingStartedAt:0,bargeNoiseFloor:0.003,micNoiseFloor:0.003,phase:'thinking',genDone:false,
+    setHalo:()=>{},setStatus:()=>{},earDiag:()=>{},markTurn:()=>{},startListening:()=>{},
+    scheduleFillerWarmup:()=>{},
+  });
+  vm.runInContext(section('class StreamingReplyPlayer','/* ---------- \u8bbe\u7f6e\u5f39\u7a97 ---------- */'),ctx);
+  return ctx;
+}
+
+async function testStreamingPlayerQueuesAndEnds(){
+  const ctx=streamingPlayerContext();
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.mediaSource.open();
+  player.onChunk(new Uint8Array([1,2]).buffer);
+  player.onChunk(new Uint8Array([3,4]).buffer);
+  assert.equal(player.sourceBuffer.appended.length,1);
+  assert.equal(player.chunks.length,1);
+  player.sourceBuffer.finishAppend();
+  await Promise.resolve();
+  assert.equal(player.audio.playCalls,1);
+  assert.equal(player.sourceBuffer.appended.length,2);
+  player.replyFinished=true;
+  player.sourceBuffer.finishAppend();
+  assert.equal(player.mediaSource.ended,1);
+}
+
+function testStreamingTimeoutEndsOnlyWhenPlaybackReallyStarts(){
+  const ctx=streamingPlayerContext();
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.mediaSource.open(); player.firstChunkTimer=17;
+  player.onChunk(new Uint8Array([1]).buffer);
+  assert.equal(player.firstChunkTimer,17);
+  player.onPlaying();
+  assert.equal(player.firstChunkTimer,null);
+}
+
+function testStreamWaitsForBlobPlayerToReleaseOwnership(){
+  const ctx=streamingPlayerContext();
+  ctx.playing=true; ctx.curAudio=null;
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.firstChunk=true; player.tryPlay();
+  assert.equal(player.audio.playCalls,0);
+  ctx.playing=false; player.tryPlay();
+  assert.equal(player.audio.playCalls,1);
+}
+
+function testLatePlayingCannotReviveFailedStream(){
+  const ctx=streamingPlayerContext();
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.failed=true; player.onPlaying();
+  assert.equal(player.hasPlayed,false);
+  assert.equal(ctx.curAudio,null);
+}
+
+function testStartedStreamCanDrainBufferedAudioAfterUpstreamFailure(){
+  const ctx=streamingPlayerContext();
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.mediaSource.open(); player.hasPlayed=true; player.firstChunk=true;
+  player.onChunk(new Uint8Array([1]).buffer);
+  player.onChunk(new Uint8Array([2]).buffer);
+  assert.equal(player.sourceBuffer.appended.length,1);
+  player.fail('upstream closed');
+  player.sourceBuffer.finishAppend();
+  assert.equal(player.sourceBuffer.appended.length,2);
+  player.sourceBuffer.finishAppend();
+  assert.equal(player.mediaSource.ended,1);
+}
+
+function testPartialStreamHandsOffQueuedBlobBeforeListening(){
+  const ctx=streamingPlayerContext();
+  let pumped=0, listened=0;
+  ctx.audioQueue=[Promise.resolve({})]; ctx.genDone=true;
+  ctx.pumpQueue=()=>{pumped++;}; ctx.startListening=()=>{listened++;};
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.hasPlayed=true; player.onEnded();
+  assert.equal(pumped,1);
+  assert.equal(listened,0);
+}
+
+function testUnplayedStreamCannotClobberBlobPlaybackOnLateEnded(){
+  const ctx=streamingPlayerContext();
+  const blobAudio={id:'blob'};
+  ctx.playing=true; ctx.playbackOwner=3; ctx.curAudio=blobAudio;
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.failed=true; player.onEnded();
+  assert.equal(ctx.playing,true);
+  assert.equal(ctx.playbackOwner,3);
+  assert.equal(ctx.curAudio,blobAudio);
+}
+
+function testStreamingPreconnectDefersTaskUntilFirstSegment(){
+  const ctx=streamingPlayerContext();
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,voice:'Jake',model:'speech-2.8-turbo',languageBoost:'auto',emotion:'',onFallback:()=>{}})",ctx);
+  player.ws.readyState=1;
+  player.onMessage({data:JSON.stringify({type:'ready'})});
+  assert.deepEqual(player.ws.sent,[]);
+
+  player.speak('你好，今天过得怎么样？',{languageBoost:'Chinese',emotion:'happy'});
+  assert.equal(player.ws.sent.length,2);
+  assert.deepEqual(player.ws.sent.map(command=>command.type),['begin_reply','speak']);
+  assert.equal(player.ws.sent[0].language_boost,'Chinese');
+  assert.equal(player.ws.sent[0].emotion,'happy');
+  assert.equal(player.ws.sent[1].text,'你好，今天过得怎么样？');
+
+  const enqueueSource=section('function enqueueSpeech','async function prepFillers');
+  assert.match(enqueueSource,/if\(isFirst&&!streamingReply\)streamingReply=beginStreamingReply\(text\)/);
+}
+
+function testStreamingPlayerDropsOldChunksAndFallbacksOnce(){
+  const ctx=streamingPlayerContext();
+  ctx.fallbackCount=0;
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{fallbackCount++;}})",ctx);
+  player.mediaSource.open(); player.speak('First sentence.');
+  ctx.interruptVersion=4;
+  player.onChunk(new Uint8Array([1]).buffer);
+  assert.equal(player.sourceBuffer.appended.length,0);
+  player.fail('before audio'); player.fail('again');
+  assert.equal(ctx.fallbackCount,1);
+}
+
+function testFailedPreconnectLeavesListeningRecoveryToBlobQueue(){
+  const finishSource=section('  finish(){','  fail(reason){');
+  assert.doesNotMatch(finishSource,/startListening/);
+  const handler=section('async function handleUserSpeech','function cleanForDisplay');
+  assert.match(handler,/streamingReply&&!streamingReply\.failed&&!streamingReply\.cancelled/);
+  assert.match(handler,/else pumpQueue\(\)/);
+}
+
+function testStreamingPlayerCancelAndUnsupportedFallback(){
+  const ctx=streamingPlayerContext();
+  const player=vm.runInContext("new StreamingReplyPlayer({replyId:'r1',generation:3,onFallback:()=>{}})",ctx);
+  player.ws.readyState=1; player.cancel();
+  assert.equal(player.cancelled,true);
+  assert.equal(player.ws.sent.at(-1).type,'cancel');
+  ctx.MediaSource.isTypeSupported=()=>false;
+  assert.equal(vm.runInContext('StreamingReplyPlayer.supported()',ctx),false);
+  const selection=section('function beginStreamingReply','function enqueueSpeech');
+  assert.match(selection,/!StreamingReplyPlayer\.supported\(\)/);
+  vm.runInContext(selection,ctx);
+  ctx.runtimeFeatures={stream_tts:false,low_latency:true};
+  assert.equal(ctx.beginStreamingReply('A complete sentence.'),null);
+}
+
 function testVoiceTakeoverNeedsSustainedSpeech(){
   let interrupted=0, captured=[];
   const ctx=makeContext({
@@ -294,6 +469,32 @@ async function testStaleStreamCannotQueueSpeech(){
   assert.equal(full,'');
   assert.equal(emitted,0);
   assert.equal(cancelled,true);
+}
+
+async function testFirstSpeakableSplitUsesSafeBoundaries(){
+  const encoder=new TextEncoder();
+  const chunks=[
+    '[neutral] This response keeps going without punctuation until it reaches a useful natural boundary',
+  ];
+  let index=0;
+  const ctx=makeContext({
+    interruptVersion:2,interrupted:false,callAbort:null,curEmotion:'',EMOTIONS:['neutral'],
+    hdrs:()=>({}),markTurn:()=>{},fetchLocal:async()=>({ok:true,body:{getReader:()=>({
+      read:async()=>index<chunks.length?{done:false,value:encoder.encode(chunks[index++])}:{done:true},
+      cancel:()=>{},
+    })}}),
+  });
+  vm.runInContext(section('async function chatStream','/* ---------- \u8bed\u97f3\u5408\u6210\u64ad\u653e\u961f\u5217 ---------- */'),ctx);
+  const emitted=[];
+  await ctx.chatStream([],value=>emitted.push(value));
+  assert.ok(emitted.length>=2);
+  assert.equal(emitted.join(' '),'This response keeps going without punctuation until it reaches a useful natural boundary');
+
+  chunks.splice(0,chunks.length,'[neutral] Please repeat this later [echo: This complete target phrase stays together]');
+  index=0; emitted.length=0;
+  await ctx.chatStream([],value=>emitted.push(value));
+  assert.equal(emitted.length,1);
+  assert.match(emitted[0],/\[echo: This complete target phrase stays together\]/);
 }
 
 async function testStalePlaybackCannotReopenMic(){
@@ -505,11 +706,23 @@ testAsrUpdateReschedulesPendingCommit();
 testFastEotFlagRestoresLegacyTiming();
 testFallbackAsrUpdatesUnifiedState();
 testThirtyUtteranceEotPolicyCorpus();
+await testStreamingPlayerQueuesAndEnds();
+testStreamingTimeoutEndsOnlyWhenPlaybackReallyStarts();
+testStreamWaitsForBlobPlayerToReleaseOwnership();
+testLatePlayingCannotReviveFailedStream();
+testStartedStreamCanDrainBufferedAudioAfterUpstreamFailure();
+testPartialStreamHandsOffQueuedBlobBeforeListening();
+testUnplayedStreamCannotClobberBlobPlaybackOnLateEnded();
+testStreamingPreconnectDefersTaskUntilFirstSegment();
+testStreamingPlayerDropsOldChunksAndFallbacksOnce();
+testFailedPreconnectLeavesListeningRecoveryToBlobQueue();
+testStreamingPlayerCancelAndUnsupportedFallback();
 testVoiceTakeoverNeedsSustainedSpeech();
 testInterruptInvalidatesOldWork();
 testLiveCoachingPromptIsEphemeral();
 testBackendFailuresAreReportedTogether();
 await testStaleStreamCannotQueueSpeech();
+await testFirstSpeakableSplitUsesSafeBoundaries();
 await testStalePlaybackCannotReopenMic();
 await testInterruptedSynthesisCannotPlayLateAudio();
 testOldCallTimersCannotEnterNewCall();

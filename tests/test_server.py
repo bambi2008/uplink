@@ -89,6 +89,17 @@ class LatencyP0Tests(unittest.TestCase):
                                  "semantic_first_audio_ms": 876.5})
 
 
+class LatencyTraceDisabledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disabled_trace_does_not_create_latency_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder) / "latency.jsonl"
+            with patch.object(server, "LATENCY_TRACE", False), patch.object(server, "LATENCY_FILE", path):
+                await server.record_latency({"type": "turn_latency", "duration_ms": 123})
+            self.assertFalse(path.exists())
+
+
 class SharedHttpClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_application_client_is_created_once_and_closed_on_cleanup(self):
         app = {}
@@ -99,6 +110,86 @@ class SharedHttpClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(StopAsyncIteration):
             await anext(context)
         self.assertTrue(client.closed)
+
+
+class StreamingTtsProtocolTests(unittest.TestCase):
+    def test_connected_and_started_events_are_recognized(self):
+        self.assertTrue(server._upstream_event_ok({
+            "event": "connected_success", "base_resp": {"status_code": 0}
+        }, "connected_success"))
+        self.assertTrue(server._upstream_event_ok({
+            "event": "task_started", "base_resp": {"status_code": 0}
+        }, "task_started"))
+        self.assertFalse(server._upstream_event_ok({
+            "event": "task_failed", "base_resp": {"status_code": 1004}
+        }, "task_started"))
+
+    def test_task_start_matches_official_websocket_schema(self):
+        event = server._tts_start_event({
+            "voice": "English_magnetic_voiced_man", "model": "speech-2.8-turbo",
+            "language_boost": "English", "emotion": "happy",
+        })
+        self.assertEqual(event["event"], "task_start")
+        self.assertEqual(event["model"], "speech-2.8-turbo")
+        self.assertEqual(event["voice_setting"]["voice_id"], "English_magnetic_voiced_man")
+        self.assertEqual(event["audio_setting"], {
+            "sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1,
+        })
+
+    def test_multiple_segments_are_strictly_ordered(self):
+        relay = server.TTSRelayState()
+        relay.begin("reply-1")
+        self.assertEqual(relay.queue_segment(0), 0)
+        self.assertEqual(relay.queue_segment(1), 1)
+        with self.assertRaises(ValueError):
+            relay.queue_segment(1)
+
+    def test_segment_order_remains_strict_after_completed_segment_is_removed(self):
+        relay = server.TTSRelayState()
+        relay.begin("reply-1")
+        relay.queue_segment(0)
+        relay.accept_upstream({"is_final": True})
+        with self.assertRaises(ValueError):
+            relay.queue_segment(0)
+
+    def test_connection_cannot_be_reused_for_a_second_reply(self):
+        relay = server.TTSRelayState()
+        relay.begin("reply-1")
+        relay.finished = True
+        with self.assertRaises(ValueError):
+            relay.begin("reply-2")
+
+    def test_hex_audio_and_final_are_forwarded_in_order(self):
+        relay = server.TTSRelayState()
+        relay.begin("reply-1")
+        relay.queue_segment(0)
+        actions = relay.accept_upstream({"data": {"audio": "494433"}, "is_final": True})
+        self.assertEqual(actions, [
+            ("binary", b"ID3"),
+            ("json", {"type": "segment_finished", "segment_id": 0}),
+        ])
+        finished = relay.accept_upstream({"event": "task_finished"})
+        self.assertEqual(finished, [("json", {"type": "reply_finished", "reply_id": "reply-1"})])
+
+    def test_cancel_stops_forwarding(self):
+        relay = server.TTSRelayState()
+        relay.begin("reply-1")
+        relay.queue_segment(0)
+        relay.cancel()
+        self.assertEqual(relay.accept_upstream({"data": {"audio": "494433"}, "is_final": True}), [])
+
+    def test_invalid_audio_and_secret_errors_are_safe(self):
+        with self.assertRaisesRegex(ValueError, "invalid audio"):
+            server._decode_tts_audio({"data": {"audio": "not-hex"}})
+        secret = "private-secret-value"
+        safe = server._safe_tts_error("Authorization Bearer " + secret, secret)
+        self.assertNotIn(secret, safe)
+        self.assertNotIn("Bearer", safe)
+
+    def test_continue_event_uses_official_fields(self):
+        self.assertEqual(server._tts_continue_event("hello"), {
+            "event": "task_continue", "text": "hello",
+        })
 
 
 class FakeSettingsRequest:

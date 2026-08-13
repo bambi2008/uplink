@@ -32,7 +32,7 @@ import pathlib
 import contextlib
 import uuid
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import aiohttp
 from aiohttp import web
@@ -61,6 +61,7 @@ XF_RTASR_HOST = "rtasr.xfyun.cn"               # 讯飞负责"听"（实时语�
 CHAT_MODEL = "MiniMax-Text-01"                 # 非思考型：不打腹稿，接话快
 CHAT_MODEL_FALLBACK = "MiniMax-M2.5-highspeed" # 若上者不可用自动回退
 TTS_MODEL = "speech-2.8-turbo"
+MINIMAX_TTS_WS = os.environ.get("UPLINK_MINIMAX_TTS_WS", "wss://api.minimaxi.com/ws/v1/t2a_v2")
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=50)
 SETTINGS_LOCK = asyncio.Lock()
 
@@ -75,7 +76,7 @@ def env_flag(name, default=False):
 LATENCY_TRACE = env_flag("UPLINK_LATENCY_TRACE", False)
 LOW_LATENCY = env_flag("UPLINK_LOW_LATENCY", True)
 FAST_EOT = env_flag("UPLINK_FAST_EOT", True)
-STREAM_TTS = env_flag("UPLINK_STREAM_TTS", False)
+STREAM_TTS = env_flag("UPLINK_STREAM_TTS", True)
 CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
     "UPLINK_CHAT_MODELS", "MiniMax-Text-01,MiniMax-M2.5-highspeed"
 ).split(",") if model.strip())
@@ -168,6 +169,105 @@ def _chat_model_candidates(now=None):
 
 def _http_client(req):
     return req.app[HTTP_CLIENT_KEY]
+
+
+def _tts_start_event(options):
+    voice = str(options.get("voice") or "English_magnetic_voiced_man")[:96]
+    model = str(options.get("model") or TTS_MODEL)[:48]
+    language_boost = str(options.get("language_boost") or "auto")[:32]
+    voice_setting = {"voice_id": voice, "speed": float(options.get("speed") or 1.0),
+                     "vol": 1, "pitch": 0}
+    emotion = str(options.get("emotion") or "").strip()
+    if emotion:
+        voice_setting["emotion"] = emotion[:24]
+    return {"event": "task_start", "model": model, "language_boost": language_boost,
+            "voice_setting": voice_setting,
+            "audio_setting": {"sample_rate": 32000, "bitrate": 128000,
+                              "format": "mp3", "channel": 1}}
+
+
+def _tts_continue_event(text):
+    return {"event": "task_continue", "text": text}
+
+
+def _decode_tts_audio(payload):
+    encoded = (payload.get("data") or {}).get("audio") if isinstance(payload, dict) else ""
+    if not encoded:
+        return b""
+    try:
+        return bytes.fromhex(encoded)
+    except (TypeError, ValueError):
+        raise ValueError("upstream returned invalid audio") from None
+
+
+def _safe_tts_error(error, key=""):
+    detail = str(error or "")
+    if key:
+        detail = detail.replace(key, "[redacted]")
+    for marker in ("authorization", "api key", "access token", "bearer"):
+        if marker in detail.lower():
+            return "MiniMax streaming TTS authentication or permission error"
+    return (detail or type(error).__name__)[:160]
+
+
+class TTSRelayState:
+    def __init__(self):
+        self.reply_id = ""
+        self.segment_ids = deque()
+        self.last_segment_id = -1
+        self.cancelled = False
+        self.finished = False
+
+    def begin(self, reply_id):
+        if self.reply_id:
+            raise ValueError("this connection already handled a reply")
+        self.reply_id = _safe_id(reply_id)
+        if not self.reply_id:
+            raise ValueError("invalid reply_id")
+
+    def queue_segment(self, segment_id):
+        if self.cancelled or self.finished:
+            raise ValueError("reply is no longer active")
+        value = int(segment_id)
+        if value <= self.last_segment_id:
+            raise ValueError("segments must be strictly ordered")
+        self.segment_ids.append(value)
+        self.last_segment_id = value
+        return value
+
+    def accept_upstream(self, payload):
+        if self.cancelled or not isinstance(payload, dict):
+            return []
+        actions = []
+        audio = _decode_tts_audio(payload)
+        if audio and self.segment_ids:
+            actions.append(("binary", audio))
+        if payload.get("is_final") and self.segment_ids:
+            actions.append(("json", {"type": "segment_finished",
+                                      "segment_id": self.segment_ids.popleft()}))
+        if payload.get("event") == "task_finished":
+            self.finished = True
+            actions.append(("json", {"type": "reply_finished", "reply_id": self.reply_id}))
+        return actions
+
+    def cancel(self):
+        self.cancelled = True
+        self.segment_ids.clear()
+
+
+def _upstream_event_ok(payload, expected):
+    return (isinstance(payload, dict) and payload.get("event") == expected
+            and (payload.get("base_resp") or {}).get("status_code", 0) == 0)
+
+
+async def _receive_upstream_json(ws, timeout=12):
+    message = await asyncio.wait_for(ws.receive(), timeout=timeout)
+    if message.type != aiohttp.WSMsgType.TEXT:
+        raise RuntimeError("unexpected upstream WebSocket frame")
+    try:
+        return json.loads(message.data)
+    except (TypeError, json.JSONDecodeError):
+        raise RuntimeError("invalid upstream WebSocket JSON") from None
 
 # MiniMax（对话+合成）
 ENV_KEY = os.environ.get("MINIMAX_API_KEY", "")
@@ -733,6 +833,181 @@ async def api_tts(req):
                         headers={"X-Uplink-TTS-Cache": "miss" if cacheable else "off"})
 
 
+async def ws_tts(req):
+    client_ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
+    await client_ws.prepare(req)
+    key = key_from(req)
+    saved = _read_local_settings()
+    key = saved.get("mm_tts_key", "") or key
+    if not key:
+        await client_ws.send_json({"type": "error", "code": "MISSING_TTS_KEY",
+                                   "message": "MiniMax TTS key is missing", "retryable": False})
+        await client_ws.close()
+        return client_ws
+
+    relay = TTSRelayState()
+    upstream = None
+    upstream_task = None
+    current_options = {}
+    upstream_started = asyncio.Event()
+    reply_end_requested = False
+    send_lock = asyncio.Lock()
+    stream_started = None
+    first_audio_sent = False
+
+    async def send_client_json(payload):
+        if not client_ws.closed:
+            async with send_lock:
+                await client_ws.send_json(payload)
+
+    async def pump_upstream():
+        nonlocal upstream, first_audio_sent
+        try:
+            async for message in upstream:
+                if relay.cancelled:
+                    break
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    if message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                        break
+                    continue
+                try:
+                    payload = json.loads(message.data)
+                except (TypeError, json.JSONDecodeError):
+                    raise RuntimeError("invalid upstream WebSocket JSON") from None
+                base_resp = payload.get("base_resp") or {}
+                if payload.get("event") == "task_failed" or base_resp.get("status_code", 0) != 0:
+                    raise RuntimeError(str(base_resp.get("status_msg") or "upstream task failed"))
+                for kind, value in relay.accept_upstream(payload):
+                    if relay.cancelled:
+                        break
+                    if kind == "binary":
+                        async with send_lock:
+                            if not client_ws.closed and not relay.cancelled:
+                                await client_ws.send_bytes(value)
+                                if not first_audio_sent:
+                                    first_audio_sent = True
+                                    duration = ((time.perf_counter() - stream_started) * 1000
+                                                if stream_started is not None else 0)
+                                    asyncio.create_task(record_latency({
+                                        "source": "server", "type": "tts_stream_first_audio",
+                                        "turn_id": relay.reply_id, "purpose": "semantic",
+                                        "model": str(current_options.get("model") or TTS_MODEL)[:48],
+                                        "audio_bytes": len(value), "duration_ms": round(duration, 1),
+                                    }))
+                    else:
+                        await send_client_json(value)
+                        if value.get("type") == "reply_finished" and stream_started is not None:
+                            asyncio.create_task(record_latency({
+                                "source": "server", "type": "tts_stream_complete",
+                                "turn_id": relay.reply_id, "purpose": "semantic",
+                                "model": str(current_options.get("model") or TTS_MODEL)[:48],
+                                "duration_ms": round((time.perf_counter() - stream_started) * 1000, 1),
+                            }))
+            if not relay.cancelled and not relay.finished:
+                raise RuntimeError("upstream TTS closed before completion")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            relay.cancel()
+            await send_client_json({"type": "error", "code": "UPSTREAM_TTS_ERROR",
+                                    "message": _safe_tts_error(exc, key), "retryable": True})
+
+    async def ensure_connection():
+        nonlocal upstream
+        if upstream and not upstream.closed:
+            return
+        upstream = await _http_client(req).ws_connect(
+            MINIMAX_TTS_WS, headers={"Authorization": "Bearer " + key}, heartbeat=20,
+        )
+        connected = await _receive_upstream_json(upstream)
+        if not _upstream_event_ok(connected, "connected_success"):
+            raise RuntimeError("upstream connection was rejected")
+
+    async def ensure_upstream():
+        nonlocal upstream, upstream_task
+        if upstream_started.is_set():
+            return
+        await ensure_connection()
+        await upstream.send_json(_tts_start_event(current_options))
+        started = await _receive_upstream_json(upstream)
+        if not _upstream_event_ok(started, "task_started"):
+            raise RuntimeError("upstream task did not start")
+        upstream_started.set()
+        upstream_task = asyncio.create_task(pump_upstream())
+
+    try:
+        await ensure_connection()
+    except Exception as exc:
+        await client_ws.send_json({"type": "error", "code": "UPSTREAM_TTS_ERROR",
+                                   "message": _safe_tts_error(exc, key), "retryable": True})
+        await client_ws.close()
+        return client_ws
+    await client_ws.send_json({"type": "ready"})
+    try:
+        async for message in client_ws:
+            if message.type != aiohttp.WSMsgType.TEXT:
+                continue
+            try:
+                command = json.loads(message.data)
+            except (TypeError, json.JSONDecodeError):
+                await send_client_json({"type": "error", "code": "INVALID_COMMAND",
+                                        "message": "invalid JSON command", "retryable": False})
+                continue
+            kind = command.get("type")
+            if kind == "begin_reply":
+                try:
+                    relay.begin(command.get("reply_id"))
+                    current_options = command
+                    await send_client_json({"type": "reply_started", "reply_id": relay.reply_id})
+                except ValueError as exc:
+                    await send_client_json({"type": "error", "code": "INVALID_REPLY",
+                                            "message": str(exc), "retryable": False})
+            elif kind == "speak":
+                if not relay.reply_id or command.get("reply_id") != relay.reply_id:
+                    await send_client_json({"type": "error", "code": "INVALID_REPLY",
+                                            "message": "begin_reply is required before speak",
+                                            "retryable": False})
+                    continue
+                text = str(command.get("text") or "").strip()
+                if not text or len(text) > 2000:
+                    await send_client_json({"type": "error", "code": "INVALID_SEGMENT",
+                                            "message": "segment text must contain 1-2000 characters",
+                                            "retryable": False})
+                    continue
+                try:
+                    segment_id = relay.queue_segment(command.get("segment_id"))
+                    if stream_started is None:
+                        stream_started = time.perf_counter()
+                    await ensure_upstream()
+                    await send_client_json({"type": "segment_started", "segment_id": segment_id})
+                    await upstream.send_json(_tts_continue_event(text))
+                except Exception as exc:
+                    relay.cancel()
+                    await send_client_json({"type": "error", "code": "UPSTREAM_TTS_ERROR",
+                                            "message": _safe_tts_error(exc, key), "retryable": True})
+            elif kind == "end_reply" and command.get("reply_id") == relay.reply_id:
+                reply_end_requested = True
+                if upstream_started.is_set() and upstream and not upstream.closed:
+                    await upstream.send_json({"event": "task_finish"})
+                elif not relay.finished:
+                    relay.finished = True
+                    await send_client_json({"type": "reply_finished", "reply_id": relay.reply_id})
+            elif kind == "cancel" and command.get("reply_id") == relay.reply_id:
+                relay.cancel()
+                break
+    except (ConnectionResetError, aiohttp.ClientError):
+        relay.cancel()
+    finally:
+        relay.cancel()
+        if upstream_task:
+            upstream_task.cancel()
+            await asyncio.gather(upstream_task, return_exceptions=True)
+        if upstream and not upstream.closed:
+            await upstream.close()
+        await client_ws.close()
+    return client_ws
+
+
 # ----------------------------------------------------------------- 实时识别中转
 
 async def ws_asr(req):
@@ -1010,7 +1285,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-12.low-latency-p0-pr2"
+BUILD = "2026-08-13.low-latency-p0"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -1260,6 +1535,7 @@ def make_app():
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_get("/ws/asr", ws_asr)
+    app.router.add_get("/ws/tts", ws_tts)
     try:
         import doubao
         app.router.add_get("/ws/doubao", doubao.doubao_relay)

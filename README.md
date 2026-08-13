@@ -37,11 +37,26 @@ python server.py
 
 Windows 可直接双击 `启动Jake.bat`，macOS 双击 `启动Jake.command`（自动装依赖并打开浏览器）。
 
+## 低延迟开关
+
+P0 低延迟机制默认开启，开发或故障回滚时可在启动服务前独立关闭：
+
+```text
+UPLINK_LATENCY_TRACE=0  # 默认关闭；设为 1 才写匿名延迟 JSONL
+UPLINK_LOW_LATENCY=0    # 恢复旧 Chat/TTS 请求实现
+UPLINK_FAST_EOT=0       # 恢复旧停顿与 ASR 收尾时序
+UPLINK_STREAM_TTS=0     # 完整恢复 /api/tts blob 播放路径
+```
+
+这些开关不改变也不清空本机通讯设置。详细测量口径、回滚顺序与已知限制见
+[`docs/latency-p0-report.md`](docs/latency-p0-report.md)。
+
 ## 项目结构
 
 ```
 server.py            # 后端：识别中转 / 对话流式转发 / 语音合成 / 每日谈资 / 复盘
 static/index.html    # 前端：舷窗界面 + 通话状态机 + 复习本（单文件）
+scripts/             # 匿名延迟汇总与真实上游基准脚本
 启动Jake.bat/.command # 一键启动
 ```
 

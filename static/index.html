@@ -585,8 +585,9 @@ let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
 let callAbort=null, fillGeneration=0, interruptVersion=0, callGeneration=0;
 let fillerAbort=null, fillerWarmStarted=false, fillersReady=false, semanticHasPlayed=false;
-let runtimeFeatures={latency_trace:false,low_latency:true,fast_eot:true,stream_tts:false};
+let runtimeFeatures={latency_trace:false,low_latency:true,fast_eot:true,stream_tts:true};
 let activeTurnTrace=null, turnTraceSequence=0;
+let streamingReply=null;
 const EMOTIONS=['happy','sad','angry','fearful','surprised','neutral'];
 
 function callLater(fn,delay){
@@ -634,7 +635,184 @@ function beginTurnTrace(source){
   return activeTurnTrace;
 }
 function markTurn(name,extra){if(activeTurnTrace)activeTurnTrace.mark(name,extra);}
+function markTurnOnce(name,extra){
+  if(activeTurnTrace&&!Object.prototype.hasOwnProperty.call(activeTurnTrace.marks,name))activeTurnTrace.mark(name,extra);
+}
 function cancelTurnTrace(reason){if(activeTurnTrace)activeTurnTrace.cancel(reason);}
+
+class StreamingReplyPlayer{
+  static supported(){
+    return typeof MediaSource==='function'&&typeof MediaSource.isTypeSupported==='function'
+      &&MediaSource.isTypeSupported('audio/mpeg')&&typeof WebSocket==='function';
+  }
+  constructor(options){
+    this.options=options; this.replyId=options.replyId; this.generation=options.generation;
+    this.segmentId=0; this.segments=[]; this.pendingCommands=[]; this.chunks=[];
+    this.ready=false; this.begun=false; this.replyStarted=false; this.replyFinished=false; this.ended=false;
+    this.firstChunk=false; this.hasPlayed=false; this.failed=false; this.cancelled=false;
+    this.fallbackStarted=false; this.playPending=false; this.objectUrl=''; this.firstChunkTimer=null;
+    this.mediaSource=new MediaSource(); this.audio=new Audio();
+    this.objectUrl=URL.createObjectURL(this.mediaSource); this.audio.src=this.objectUrl;
+    this.audio.preload='auto'; this.audio.onplaying=()=>this.onPlaying();
+    this.audio.onended=()=>this.onEnded(); this.audio.onerror=()=>this.fail('audio playback failed');
+    this.mediaSource.addEventListener('sourceopen',()=>this.onSourceOpen(),{once:true});
+    this.openSocket();
+  }
+  isCurrent(){return !this.cancelled&&this.generation===interruptVersion&&active;}
+  openSocket(){
+    try{
+      const proto=location.protocol==='https:'?'wss':'ws';
+      this.ws=new WebSocket(proto+'://'+location.host+'/ws/tts'); this.ws.binaryType='arraybuffer';
+      this.ws.onmessage=event=>this.onMessage(event);
+      this.ws.onerror=()=>this.fail('streaming TTS connection failed');
+      this.ws.onclose=()=>{if(!this.replyFinished&&!this.cancelled)this.fail('streaming TTS closed early');};
+    }catch(error){this.fail(error&&error.message||'streaming TTS unavailable');}
+  }
+  onSourceOpen(){
+    if(this.cancelled)return;
+    try{
+      this.sourceBuffer=this.mediaSource.addSourceBuffer('audio/mpeg');
+      this.sourceBuffer.addEventListener('updateend',()=>{
+        if(this.firstChunk&&!this.hasPlayed)this.tryPlay();
+        this.drain();
+      });
+      this.drain();
+    }catch(error){this.fail(error&&error.message||'SourceBuffer unavailable');}
+  }
+  send(command){
+    if(this.cancelled||this.failed)return;
+    if(this.ws&&this.ws.readyState===1&&this.ready)this.ws.send(JSON.stringify(command));
+    else this.pendingCommands.push(command);
+  }
+  flushCommands(){
+    if(!this.ws||this.ws.readyState!==1||!this.ready)return;
+    while(this.pendingCommands.length&&!this.cancelled)this.ws.send(JSON.stringify(this.pendingCommands.shift()));
+  }
+  onMessage(event){
+    if(!this.isCurrent())return;
+    if(event.data instanceof ArrayBuffer){this.onChunk(event.data);return;}
+    if(typeof Blob==='function'&&event.data instanceof Blob){
+      event.data.arrayBuffer().then(buffer=>{if(this.isCurrent())this.onChunk(buffer);});return;
+    }
+    let message; try{message=JSON.parse(event.data)}catch{return;}
+    if(message.type==='ready'){
+      this.ready=true;
+      this.flushCommands();
+    }else if(message.type==='reply_started'){
+      this.replyStarted=true;
+      this.flushCommands();
+    }else if(message.type==='reply_finished'){
+      this.replyFinished=true; this.drain();
+    }else if(message.type==='error')this.fail(message.message||'streaming TTS failed');
+  }
+  onChunk(buffer){
+    if(!this.isCurrent()||this.failed)return;
+    if(!this.firstChunk){
+      this.firstChunk=true; markTurn('tts_first_audio_chunk');
+    }
+    this.chunks.push(buffer.slice(0)); this.drain();
+  }
+  drain(){
+    if(this.cancelled||(this.failed&&!this.hasPlayed)||!this.sourceBuffer||this.sourceBuffer.updating)return;
+    if(this.chunks.length){
+      try{
+        this.sourceBuffer.appendBuffer(this.chunks.shift());
+      }catch(error){this.fail(error&&error.message||'audio buffer failed');}
+      return;
+    }
+    if(this.replyFinished&&this.mediaSource.readyState==='open'){
+      try{this.mediaSource.endOfStream();}catch{}
+    }
+  }
+  tryPlay(){
+    if(this.playPending||this.hasPlayed||this.cancelled||this.failed)return;
+    if(playing&&curAudio!==this.audio){setTimeout(()=>this.tryPlay(),30);return;}
+    this.playPending=true;
+    this.audio.play().then(()=>{this.playPending=false;}).catch(error=>{
+      this.playPending=false;
+      if(!audioUnlocked){
+        clearTimeout(this.firstChunkTimer); this.firstChunkTimer=null;
+        setStatus('🔊 浏览器拦了声音 · <b>请点击页面任意位置解锁</b>');
+        const unlock=()=>{document.removeEventListener('pointerdown',unlock);this.tryPlay();};
+        document.addEventListener('pointerdown',unlock);
+      }else this.fail(error&&error.message||'audio play failed');
+    });
+  }
+  onPlaying(){
+    if(!this.isCurrent()||this.failed||this.hasPlayed)return;
+    clearTimeout(this.firstChunkTimer); this.firstChunkTimer=null;
+    this.hasPlayed=true; audioUnlocked=true; semanticHasPlayed=true;
+    playing=true; playbackOwner=this.generation; curAudio=this.audio; speakingStartedAt=Date.now();
+    bargeNoiseFloor=Math.max(micNoiseFloor,0.003); phase='speaking'; setHalo('speaking');
+    setStatus('TRANSMISSION · Jake 正在说…（你开口他会自动停下）');
+    earDiag('Jake 正在说 · 耳朵保持待命，你开口他会停下');
+    markTurn('semantic_audio_playing',{tts_path:'stream'});
+  }
+  ensureBegin(options){
+    if(this.begun)return;
+    if(options)Object.assign(this.options,options);
+    this.begun=true;
+    this.send({type:'begin_reply',reply_id:this.replyId,voice:this.options.voice,
+      model:this.options.model,language_boost:this.options.languageBoost,emotion:this.options.emotion||''});
+  }
+  speak(text,options){
+    if(this.cancelled||this.failed)return false;
+    this.ensureBegin(options);
+    const segmentId=this.segmentId++;
+    this.segments.push({segmentId,text}); markTurnOnce('tts_request');
+    this.send({type:'speak',reply_id:this.replyId,segment_id:segmentId,text});
+    if(!this.firstChunkTimer)this.firstChunkTimer=setTimeout(()=>this.fail('streaming TTS first chunk timeout'),5000);
+    return true;
+  }
+  finish(){
+    if(this.cancelled)return;
+    if(this.failed){this.maybeFallback();return;}
+    if(!this.begun){this.replyFinished=true;this.onEnded();return;}
+    this.send({type:'end_reply',reply_id:this.replyId});
+  }
+  fail(reason){
+    if(this.failed||this.cancelled)return;
+    this.failed=true; clearTimeout(this.firstChunkTimer); this.firstChunkTimer=null;
+    if(!this.hasPlayed)this.maybeFallback();
+    else this.finishAfterError(reason);
+  }
+  maybeFallback(){
+    if(this.fallbackStarted||this.cancelled||this.hasPlayed)return;
+    this.fallbackStarted=true; this.closeTransport();
+    this.options.onFallback(this.segments.slice());
+  }
+  finishAfterError(){
+    clearTimeout(this.firstChunkTimer); this.firstChunkTimer=null; this.pendingCommands=[];
+    if(this.ws&&this.ws.readyState<=1){try{this.ws.close()}catch{}}
+    this.replyFinished=true;
+    this.drain();
+  }
+  onEnded(){
+    if(this.ended)return; this.ended=true;
+    if(this.hasPlayed){
+      playing=false; playbackOwner=-1; speakingStartedAt=0;
+      if(curAudio===this.audio)curAudio=null;
+    }
+    this.closeTransport();
+    if(this.failed&&!this.hasPlayed)return;
+    if(this.isCurrent()&&audioQueue.length){pumpQueue();return;}
+    if(this.isCurrent()&&genDone){startListening();scheduleFillerWarmup();}
+  }
+  closeTransport(){
+    clearTimeout(this.firstChunkTimer); this.firstChunkTimer=null; this.chunks=[]; this.pendingCommands=[];
+    try{this.audio.pause()}catch{}
+    if(this.ws&&this.ws.readyState<=1){try{this.ws.close()}catch{}}
+    if(this.objectUrl){URL.revokeObjectURL(this.objectUrl);this.objectUrl='';}
+  }
+  cancel(){
+    if(this.cancelled)return;
+    this.cancelled=true; clearTimeout(this.firstChunkTimer); this.firstChunkTimer=null;
+    if(this.ws&&this.ws.readyState===1){try{this.ws.send(JSON.stringify({type:'cancel',reply_id:this.replyId}))}catch{}}
+    try{this.audio.pause()}catch{} this.closeTransport();
+    if(curAudio===this.audio)curAudio=null;
+    playing=false; playbackOwner=-1; this.chunks=[];
+  }
+}
 
 /* ---------- 设置弹窗 ---------- */
 $('btnKey').onclick=async ()=>{
@@ -705,23 +883,19 @@ async function tts(text, vid, emotion, modelOverride, keyOverride, meta){
   /* 音质档位：高清hd（默认）/ 极速turbo。语言增强按句子成分智能选：
      纯英文→English（韵律地道）；中文为主→Chinese（治中文AI味）；混合→auto */
   const model = modelOverride || ((sGet('mm_tq')||'hd')==='turbo' ? 'speech-2.8-turbo' : 'speech-2.8-hd');
-  const cjk=(text.match(/[\u4e00-\u9fff]/g)||[]).length;
-  const latin=(text.match(/[a-zA-Z]/g)||[]).length;
-  let boost='auto';
-  if(cjk===0) boost='English';
-  else if(cjk>latin) boost='Chinese';
+  const boost=languageBoostFor(text);
   meta=meta||{};
   const options={method:'POST',headers:hdrs({},keyOverride||sGet('mm_tts_key')||sGet('mm_key')),
     body:JSON.stringify({text,voice:vid||jakeVoice(),emotion:emotion||'',
       model,language_boost:boost,purpose:meta.purpose||'semantic',turn_id:meta.turnId||''})};
   if(meta.signal)options.signal=meta.signal;
   else if(callAbort) options.signal=callAbort.signal;
-  if((meta.purpose||'semantic')==='semantic')markTurn('tts_request');
+  if((meta.purpose||'semantic')==='semantic')markTurnOnce('tts_request');
   const r=await fetchLocal('/api/tts',options, '语音合成接口');
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{}; throw new Error('合成失败 '+r.status+(m?'：'+m:''))}
-  if((meta.purpose||'semantic')==='semantic')markTurn('tts_first_response_chunk');
+  if((meta.purpose||'semantic')==='semantic')markTurnOnce('tts_first_response_chunk');
   const blob=await r.blob();
-  if((meta.purpose||'semantic')==='semantic')markTurn('tts_complete');
+  if((meta.purpose||'semantic')==='semantic')markTurnOnce('tts_complete');
   return blob;
 }
 async function chatStream(messages, onSentence, turnId){
@@ -741,6 +915,14 @@ async function chatStream(messages, onSentence, turnId){
     pending+=t; full+=t;
     if(!firstOut && pending.trim().length>=10 && SOFT.test(pending)){if(turnId)markTurn('chat_first_speakable');onSentence(pending.trim());pending='';firstOut=true;return;}
     if(pending.length>=18 && SENT.test(pending)){if(!firstOut&&turnId)markTurn('chat_first_speakable');onSentence(pending.trim());pending='';firstOut=true;}
+    const limit=firstOut?90:48;
+    if(pending.length>=limit&&!/\[\s*echo\s*:/i.test(pending)){
+      const cut=pending.lastIndexOf(' ',limit);
+      if(cut>=24){
+        if(!firstOut&&turnId)markTurn('chat_first_speakable');
+        onSentence(pending.slice(0,cut).trim()); pending=pending.slice(cut+1); firstOut=true;
+      }
+    }
   }
   while(true){
     const {done,value}=await reader.read(); if(done)break;
@@ -773,6 +955,33 @@ function sanitizeSpeech(t){
 function firstSegmentTtsModel(isFirst){
   return runtimeFeatures.low_latency&&isFirst?'speech-2.8-turbo':null;
 }
+function languageBoostFor(text){
+  const value=String(text||'');
+  if(!value.trim())return 'auto';
+  const cjk=(value.match(/[\u4e00-\u9fff]/g)||[]).length;
+  const latin=(value.match(/[a-zA-Z]/g)||[]).length;
+  if(cjk===0)return 'English';
+  if(cjk>latin)return 'Chinese';
+  return 'auto';
+}
+function enqueueBlobSpeech(text,override,speechVersion,turnId){
+  audioQueue.push(tts(text,null,curEmotion,override,null,{purpose:'semantic',turnId}).then(blob=>({blob,purpose:'semantic',turnId})).catch(err=>{
+    if(speechVersion===interruptVersion&&active&&!interrupted&&!ttsErrShown){ ttsErrShown=true;
+      setStatus('⚠️ 语音合成失败：'+err.message+'<br><span style="font-size:11px">若提示 1004/GroupId，去通讯设置里补填 GroupId</span>'); }
+    return null; }));
+  pumpQueue();
+}
+function beginStreamingReply(firstText){
+  if(!runtimeFeatures.stream_tts||!runtimeFeatures.low_latency||!StreamingReplyPlayer.supported())return null;
+  const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
+  const generation=interruptVersion;
+  return new StreamingReplyPlayer({replyId:turnId||('reply-'+Date.now().toString(36)),generation,
+    voice:jakeVoice(),model:'speech-2.8-turbo',languageBoost:languageBoostFor(firstText),emotion:curEmotion,
+    onFallback:segments=>{
+      if(generation!==interruptVersion||!active||interrupted)return;
+      for(const segment of segments)enqueueBlobSpeech(segment.text,'speech-2.8-turbo',generation,turnId);
+    }});
+}
 function enqueueSpeech(text){
   /* Jake 在要求跟读的回合末尾埋 [echo: 目标句]，读出来之前剥掉并记下目标 */
   text=text.replace(/\[\s*echo\s*:\s*([^\]]+)\]/ig,(m,p)=>{pendingEcho=p.trim();return '';});
@@ -786,11 +995,12 @@ function enqueueSpeech(text){
   const override = firstSegmentTtsModel(isFirst);
   const speechVersion=interruptVersion;
   const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
-  audioQueue.push(tts(text,null,curEmotion,override,null,{purpose:'semantic',turnId}).then(blob=>({blob,purpose:'semantic',turnId})).catch(err=>{
-    if(speechVersion===interruptVersion&&active&&!interrupted&&!ttsErrShown){ ttsErrShown=true;
-      setStatus('⚠️ 语音合成失败：'+err.message+'<br><span style="font-size:11px">若提示 1004/GroupId，去通讯设置里补填 GroupId</span>'); }
-    return null; }));
-  pumpQueue();
+  if(isFirst&&!streamingReply)streamingReply=beginStreamingReply(text);
+  if(streamingReply&&!streamingReply.failed&&!streamingReply.cancelled){
+    streamingReply.speak(text,{languageBoost:languageBoostFor(text),emotion:curEmotion});
+    return;
+  }
+  enqueueBlobSpeech(text,override,speechVersion,turnId);
 }
 async function prepFillers(){
   /* 两池分工：
@@ -900,6 +1110,7 @@ function playBlob(blob,meta){
 function interruptJakeForUser(source,preRoll){
   if(phase!=='speaking'&&phase!=='thinking')return false;
   cancelTurnTrace('user_interrupted');
+  if(streamingReply){streamingReply.cancel();streamingReply=null;}
   interruptVersion++; interrupted=true;
   const audio=curAudio; stopCurrentAudio(); if(audio){try{audio.pause()}catch{}}
   audioQueue=[]; playing=false; playbackOwner=-1; genDone=true;
@@ -1397,6 +1608,7 @@ async function handleUserSpeech(text,displayText){
   if(!activeTurnTrace||activeTurnTrace.finalized||activeTurnTrace.cancelled)beginTurnTrace('transcript');
   addLine('user',displayText||text);
   phase='thinking'; thinkingStartedAt=Date.now(); setHalo('thinking'); setStatus('Jake 在想…'); interrupted=false; genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+  streamingReply=beginStreamingReply('');
   const replyVersion=interruptVersion;
   playFiller();
   try{
@@ -1407,8 +1619,11 @@ async function handleUserSpeech(text,displayText){
     genDone=true;
     if(full){history.push({role:'assistant',content:cleanForHistory(full)});
       addLine('assistant',cleanForDisplay(full));}
-    pumpQueue();
-  }catch(err){ if(replyVersion!==interruptVersion)return; genDone=true; setHalo(''); setStatus('出了点状况：'+err.message+'<br>直接继续说即可'); startListening(); }
+    if(streamingReply&&!streamingReply.failed&&!streamingReply.cancelled)streamingReply.finish();
+    else pumpQueue();
+  }catch(err){ if(replyVersion!==interruptVersion)return; genDone=true;
+    if(streamingReply){streamingReply.cancel();streamingReply=null;}
+    setHalo(''); setStatus('出了点状况：'+err.message+'<br>直接继续说即可'); startListening(); }
 }
 function cleanForDisplay(t){
   return stripParentheticals(t,false)
@@ -1513,6 +1728,7 @@ function withTimeout(promise,ms,name){
 
 function resetCallRuntime(){
   cancelTurnTrace('call_reset'); activeTurnTrace=null;
+  if(streamingReply){streamingReply.cancel();streamingReply=null;}
   cancelFillerWarmup(); fillerWarmStarted=false; fillersReady=false; semanticHasPlayed=false;
   callGeneration++;
   clearInterval(tick); tick=null;
@@ -1572,14 +1788,15 @@ async function startCall(){
     step(4,'呼叫地面控制 · 唤醒 Jake…（最多40秒）');
     setHalo('thinking'); phase='thinking'; thinkingStartedAt=Date.now();
     history.push({role:'user',content:'(The call just connected. Open with ONE short warm Chinese greeting like "哎，接通啦！最近咋样啊？" then glide into English small talk. Emotion tag first.)'});
-    genDone=false; curEmotion=''; replySeg=0; gapFills=0;
+    genDone=false; curEmotion=''; replySeg=0; gapFills=0; streamingReply=beginStreamingReply('');
     const openingVersion=interruptVersion;
     const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（MiniMax对话接口）');
     if(openingVersion!==interruptVersion){starting=false;return;}
     genDone=true;
     if(opening){history.push({role:'assistant',content:cleanForHistory(opening)}); addLine('assistant',cleanForDisplay(opening));}
     starting=false;
-    pumpQueue();
+    if(streamingReply&&!streamingReply.failed&&!streamingReply.cancelled)streamingReply.finish();
+    else pumpQueue();
   }catch(err){
     setStatus('⚠️ 通讯建立失败：'+err.message+'<br><span style="font-size:11px;opacity:.8">把这行字发给开发者即可定位</span>');
     active=false; starting=false; phase='idle'; genDone=true; cleanup(); setHalo('');
@@ -1599,6 +1816,7 @@ function startTimer(){
 }
 function cleanup(){
   cancelTurnTrace('call_cleanup'); activeTurnTrace=null;
+  if(streamingReply){streamingReply.cancel();streamingReply=null;}
   cancelFillerWarmup();
   fillGeneration++; interruptVersion++; callGeneration++;
   starting=false;
