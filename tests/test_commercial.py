@@ -75,6 +75,16 @@ class CommercialCredentialIsolationTests(unittest.TestCase):
              patch.object(server, "_read_local_settings", side_effect=AssertionError("must not read local settings")):
             self.assertEqual(server._provider_settings()["mm_key"], "server-chat")
 
+    def test_websocket_tickets_are_path_bound_and_single_use(self):
+        commercial.WS_TICKETS.clear()
+        ticket = commercial._issue_ws_ticket("user-1", "/ws/tts")
+        self.assertIsNone(commercial._consume_ws_ticket(ticket, "/ws/asr"))
+        self.assertIsNone(commercial._consume_ws_ticket(ticket, "/ws/tts"))
+
+        ticket = commercial._issue_ws_ticket("user-1", "/ws/tts")
+        self.assertEqual(commercial._consume_ws_ticket(ticket, "/ws/tts"), "user-1")
+        self.assertIsNone(commercial._consume_ws_ticket(ticket, "/ws/tts"))
+
 
 if __name__ == "__main__":
     unittest.main()

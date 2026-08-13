@@ -706,6 +706,12 @@ class TurnLatencyTrace{
     }
   }
 }
+function openUplinkSocket(url){
+  if(window.UplinkNative&&typeof window.UplinkNative.openWebSocket==='function'){
+    return window.UplinkNative.openWebSocket(url);
+  }
+  return new WebSocket(url);
+}
 function beginTurnTrace(source){
   if(activeTurnTrace&&!activeTurnTrace.finalized)activeTurnTrace.cancel('superseded');
   activeTurnTrace=new TurnLatencyTrace(source);
@@ -740,11 +746,23 @@ class StreamingReplyPlayer{
   openSocket(){
     try{
       const proto=location.protocol==='https:'?'wss':'ws';
-      this.ws=new WebSocket(proto+'://'+location.host+'/ws/tts'); this.ws.binaryType='arraybuffer';
+      const url=proto+'://'+location.host+'/ws/tts';
+      const nativeBridge=typeof window!=='undefined'&&window.UplinkNative;
+      const opened=nativeBridge&&typeof nativeBridge.openWebSocket==='function'
+        ?nativeBridge.openWebSocket(url):new WebSocket(url);
+      if(opened&&typeof opened.then==='function'){
+        opened.then(ws=>this.attachSocket(ws)).catch(error=>this.fail(error&&error.message||'streaming TTS unavailable'));
+        return;
+      }
+      this.attachSocket(opened);
+    }catch(error){this.fail(error&&error.message||'streaming TTS unavailable');}
+  }
+  attachSocket(ws){
+    if(this.cancelled){try{ws.close()}catch{}return;}
+    this.ws=ws; this.ws.binaryType='arraybuffer';
       this.ws.onmessage=event=>this.onMessage(event);
       this.ws.onerror=()=>this.fail('streaming TTS connection failed');
       this.ws.onclose=()=>{if(!this.replyFinished&&!this.cancelled)this.fail('streaming TTS closed early');};
-    }catch(error){this.fail(error&&error.message||'streaming TTS unavailable');}
   }
   onSourceOpen(){
     if(this.cancelled)return;
@@ -1352,6 +1370,9 @@ function failEngine(reason,failedWS){
   } else { engineFailing=false; startFallbackASR(engineFailures.join('；')||reason); }
 }
 function connectASR(){
+  void connectASRAsync();
+}
+async function connectASRAsync(){
   /* 采集管线（WebAudio）没建起来，就没法给后端送音频 → 必须走备用识别 */
   if(!micPipeOk){ startFallbackASR('浏览器音频管线未建立（WebAudio 初始化失败）'); return; }
   if(engineFailing)return;
@@ -1375,7 +1396,7 @@ function connectASR(){
     if(!serverManagedCredentials)url+='?appid='+encodeURIComponent(sGet('xf_appid'))+'&apikey='+encodeURIComponent(sGet('xf_apikey'));
   }
   let ws;
-  try{ ws=new WebSocket(url); }
+  try{ ws=await openUplinkSocket(url); }
   catch(e){ failEngine('WebSocket 创建失败：'+e); return; }
   const generation=++asrGeneration; asrWS=ws; ws.binaryType='arraybuffer';
   ws.onmessage=ev=>{
@@ -2146,8 +2167,8 @@ async function bootUplink(){
   try{const r=await fetch('/api/account/me',{cache:'no-store'});if(r.ok){const j=await r.json();await accountReady(j.user);return}}catch{}
   $('accountGate').style.display='flex';
 }
-bootUplink();
-if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='127.0.0.1'||location.hostname==='localhost')){
+window.addEventListener('DOMContentLoaded',bootUplink,{once:true});
+if(!window.UplinkNative&&'serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='127.0.0.1'||location.hostname==='localhost')){
   window.addEventListener('load',()=>navigator.serviceWorker.register('/service-worker.js').catch(()=>{}));
 }
 </script>

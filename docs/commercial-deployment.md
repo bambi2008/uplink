@@ -39,3 +39,34 @@ Before inviting paying customers:
 4. Add email verification, password reset, account deletion, privacy terms, and
    abuse controls.
 5. Load test simultaneous ASR and TTS WebSocket sessions.
+
+## Native iPhone and Android clients
+
+The native projects package the Uplink interface locally. They do not use
+Capacitor's production `server.url` option and do not contain provider secrets.
+The app keeps its customer session in iOS Keychain / Android Keystore-backed
+storage and exchanges it for a path-bound, one-time, 30-second WebSocket ticket.
+
+Build the web payload for the real public HTTPS API before every native sync:
+
+```powershell
+$env:UPLINK_API_ORIGIN='https://app.example.com'
+npm install
+npm run mobile:sync
+```
+
+- Android: open `android/` in Android Studio, install the required SDK, then
+  create a signed AAB for Google Play.
+- iOS: open `ios/App/App.xcodeproj` on macOS with Xcode, select the Apple
+  Developer team, verify the microphone privacy text, then archive for App Store
+  Connect.
+- The app id is currently `com.bambi2008.uplink`. Change it before the first
+  store upload only if the seller's owned domain requires another reverse-domain
+  identifier; changing it later creates a different app.
+- Keep `UPLINK_NATIVE_ORIGINS` restricted to the shipped Capacitor origins.
+- Replace SQLite with managed PostgreSQL before running more than one backend
+  replica. In-memory WebSocket tickets require sticky single-replica operation
+  until a shared Redis ticket store is added.
+
+The checked-in native projects contain no signing certificates, provisioning
+profiles, Android keystores, passwords, customer data, or provider credentials.

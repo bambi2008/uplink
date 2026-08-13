@@ -1694,7 +1694,8 @@ async def api_asr_test(req):
 def make_app():
     middlewares = [mobile_access_middleware]
     if COMMERCIAL_MODE:
-        middlewares.insert(0, commercial.auth_middleware)
+        middlewares = [commercial.cors_middleware, commercial.auth_middleware,
+                       mobile_access_middleware]
     app = web.Application(client_max_size=1024 * 1024 * 8,
                           middlewares=middlewares)
     if COMMERCIAL_MODE:

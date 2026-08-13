@@ -41,9 +41,16 @@ USER_KEY = web.RequestKey("uplink_commercial_user", dict)
 STORE_KEY = web.AppKey("uplink_commercial_store", object)
 PUBLIC_ORIGIN = os.environ.get("UPLINK_PUBLIC_ORIGIN", "").rstrip("/")
 TRUST_PROXY = env_flag("UPLINK_TRUST_PROXY", False)
+NATIVE_ORIGINS = {
+    value.strip().rstrip("/") for value in os.environ.get(
+        "UPLINK_NATIVE_ORIGINS", "capacitor://localhost,https://localhost"
+    ).split(",") if value.strip()
+}
 AUTH_WINDOW_SECONDS = 600
 AUTH_ATTEMPT_LIMIT = 20
 AUTH_ATTEMPTS = defaultdict(deque)
+WS_TICKET_SECONDS = 30
+WS_TICKETS = {}
 
 PUBLIC_PATHS = {
     "/", "/favicon.ico", "/manifest.webmanifest", "/service-worker.js",
@@ -54,6 +61,7 @@ METERED_PATHS = {
     "/api/chat", "/api/tts", "/api/briefing", "/api/report", "/api/ise",
     "/ws/asr", "/ws/tts", "/ws/doubao",
 }
+WEBSOCKET_PATHS = {"/ws/asr", "/ws/tts", "/ws/doubao"}
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -76,6 +84,41 @@ def _password_valid(password, encoded):
 
 def _token_hash(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _request_session_token(req):
+    auth = req.headers.get("Authorization", "")
+    if isinstance(auth, str) and auth.lower().startswith("bearer "):
+        supplied = auth[7:].strip()
+        if supplied:
+            return supplied
+    return req.cookies.get(COOKIE_NAME, "")
+
+
+def _native_client(req):
+    return req.headers.get("X-Uplink-Client", "").strip().lower() == "native"
+
+
+def _issue_ws_ticket(user_id, path):
+    now = time.monotonic()
+    expired = [key for key, value in WS_TICKETS.items() if value[2] <= now]
+    for key in expired:
+        WS_TICKETS.pop(key, None)
+    ticket = secrets.token_urlsafe(24)
+    WS_TICKETS[_token_hash(ticket)] = (user_id, path, now + WS_TICKET_SECONDS)
+    return ticket
+
+
+def _consume_ws_ticket(ticket, path):
+    if not ticket:
+        return None
+    record = WS_TICKETS.pop(_token_hash(ticket), None)
+    if not record:
+        return None
+    user_id, allowed_path, expires = record
+    if allowed_path != path or expires <= time.monotonic():
+        return None
+    return user_id
 
 
 def _public_user(row, used=0):
@@ -315,7 +358,10 @@ async def account_register(req):
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return web.json_response({"error": str(exc) or "注册信息无效"}, status=400)
     token = await store(req).create_session(account["id"])
-    response = web.json_response({"user": _public_user(account)})
+    payload = {"user": _public_user(account)}
+    if _native_client(req):
+        payload["access_token"] = token
+    response = web.json_response(payload, headers={"Cache-Control": "no-store"})
     _set_session_cookie(response, token)
     return response
 
@@ -332,13 +378,16 @@ async def account_login(req):
         return web.json_response({"error": "邮箱或密码不正确"}, status=401)
     token = await store(req).create_session(account["id"])
     used = await store(req).usage(account["id"])
-    response = web.json_response({"user": _public_user(account, used)})
+    payload = {"user": _public_user(account, used)}
+    if _native_client(req):
+        payload["access_token"] = token
+    response = web.json_response(payload, headers={"Cache-Control": "no-store"})
     _set_session_cookie(response, token)
     return response
 
 
 async def account_logout(req):
-    await store(req).delete_session(req.cookies.get(COOKIE_NAME, ""))
+    await store(req).delete_session(_request_session_token(req))
     response = web.json_response({"ok": True})
     response.del_cookie(COOKIE_NAME, path="/")
     return response
@@ -348,6 +397,19 @@ async def account_me(req):
     account = user(req)
     used = await store(req).usage(account["id"])
     return web.json_response({"user": _public_user(account, used)})
+
+
+async def websocket_ticket(req):
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "请求体不是 JSON"}, status=400)
+    path = str(body.get("path") or "") if isinstance(body, dict) else ""
+    if path not in WEBSOCKET_PATHS:
+        return web.json_response({"error": "不支持的语音通道"}, status=400)
+    ticket = _issue_ws_ticket(user(req)["id"], path)
+    return web.json_response({"ticket": ticket, "expires_in": WS_TICKET_SECONDS},
+                             headers={"Cache-Control": "no-store"})
 
 
 async def reports_list(req):
@@ -377,10 +439,18 @@ async def auth_middleware(req, handler):
 
     if req.path not in PUBLIC_PATHS and PUBLIC_ORIGIN:
         origin = req.headers.get("Origin", "").rstrip("/")
-        if origin and origin != PUBLIC_ORIGIN:
+        if origin and origin != PUBLIC_ORIGIN and origin not in NATIVE_ORIGINS:
             return web.json_response({"error": "请求来源无效"}, status=403)
 
-    account = await store(req).user_for_token(req.cookies.get(COOKIE_NAME, ""))
+    account = None
+    supplied_ticket = req.query.get("ticket") if req.path in WEBSOCKET_PATHS else None
+    if supplied_ticket:
+        user_id = _consume_ws_ticket(supplied_ticket, req.path)
+        if not user_id:
+            return web.json_response({"error": "语音通道凭证无效", "code": "AUTH_REQUIRED"}, status=401)
+        account = await store(req).user_by_id(user_id)
+    else:
+        account = await store(req).user_for_token(_request_session_token(req))
     if not account:
         return web.json_response({"error": "请先登录", "code": "AUTH_REQUIRED"}, status=401)
     req[USER_KEY] = account
@@ -395,6 +465,25 @@ async def auth_middleware(req, handler):
     return await handler(req)
 
 
+@web.middleware
+async def cors_middleware(req, handler):
+    if not ENABLED:
+        return await handler(req)
+    origin = req.headers.get("Origin", "").rstrip("/")
+    allowed = origin in NATIVE_ORIGINS
+    if req.method == "OPTIONS" and allowed:
+        response = web.Response(status=204)
+    else:
+        response = await handler(req)
+    if allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Uplink-Client"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Max-Age"] = "600"
+    return response
+
+
 async def store_context(app):
     runtime_store = CommercialStore()
     await runtime_store.initialize()
@@ -407,6 +496,7 @@ def add_routes(app):
     app.router.add_post("/api/account/login", account_login)
     app.router.add_post("/api/account/logout", account_logout)
     app.router.add_get("/api/account/me", account_me)
+    app.router.add_post("/api/account/ws-ticket", websocket_ticket)
     app.router.add_get("/api/reports", reports_list)
     app.router.add_get("/api/health/live", health_live)
     app.router.add_get("/api/health/ready", health_ready)

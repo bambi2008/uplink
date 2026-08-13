@@ -1,0 +1,17 @@
+{
+  "appId": "com.bambi2008.uplink",
+  "appName": "Uplink",
+  "webDir": "www",
+  "loggingBehavior": "none",
+  "backgroundColor": "#05070c",
+  "appendUserAgent": " UplinkNative/1",
+  "android": {
+    "backgroundColor": "#05070c",
+    "webContentsDebuggingEnabled": false
+  },
+  "ios": {
+    "backgroundColor": "#05070c",
+    "preferredContentMode": "mobile",
+    "webContentsDebuggingEnabled": false
+  }
+}

@@ -23,7 +23,7 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.server_mode = patch.object(server, "COMMERCIAL_MODE", True)
         self.server_mode.start()
 
-        app = web.Application(middlewares=[commercial.auth_middleware])
+        app = web.Application(middlewares=[commercial.cors_middleware, commercial.auth_middleware])
         app[commercial.STORE_KEY] = self.store
         commercial.add_routes(app)
         app.router.add_get("/api/local_settings", server.api_local_settings)
@@ -33,6 +33,7 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({"user_id": commercial.user(req)["id"]})
 
         app.router.add_get("/api/private", private)
+        app.router.add_get("/ws/asr", private)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
 
@@ -97,6 +98,50 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.status, 401)
         self.assertEqual(second.status, 401)
         self.assertEqual(blocked.status, 429)
+
+    async def test_native_bearer_session_and_one_time_websocket_ticket(self):
+        registered = await self.client.post("/api/account/register", headers={"X-Uplink-Client": "native"}, json={
+            "email": "native@example.com", "password": "customer-password", "name": "Native",
+        })
+        payload = await registered.json()
+        token = payload.get("access_token")
+        self.assertTrue(token)
+        self.client.session.cookie_jar.clear()
+
+        auth = {"Authorization": "Bearer " + token, "X-Uplink-Client": "native"}
+        me = await self.client.get("/api/account/me", headers=auth)
+        self.assertEqual(me.status, 200)
+        ticket_response = await self.client.post("/api/account/ws-ticket", headers=auth, json={"path": "/ws/asr"})
+        ticket = (await ticket_response.json())["ticket"]
+        first = await self.client.get("/ws/asr?ticket=" + ticket)
+        second = await self.client.get("/ws/asr?ticket=" + ticket, headers=auth)
+        self.assertEqual(first.status, 200)
+        self.assertEqual(second.status, 401)
+
+    async def test_native_cors_preflight_is_narrowly_allowed(self):
+        allowed = await self.client.options("/api/private", headers={
+            "Origin": "capacitor://localhost",
+            "Access-Control-Request-Method": "GET",
+        })
+        denied = await self.client.options("/api/private", headers={
+            "Origin": "https://attacker.example",
+            "Access-Control-Request-Method": "GET",
+        })
+        self.assertEqual(allowed.status, 204)
+        self.assertEqual(allowed.headers.get("Access-Control-Allow-Origin"), "capacitor://localhost")
+        self.assertNotIn("Access-Control-Allow-Origin", denied.headers)
+
+    async def test_production_origin_check_accepts_native_and_rejects_other_sites(self):
+        registered = await self.client.post("/api/account/register", headers={"X-Uplink-Client": "native"}, json={
+            "email": "origin@example.com", "password": "customer-password", "name": "Origin",
+        })
+        token = (await registered.json())["access_token"]
+        auth = {"Authorization": "Bearer " + token, "X-Uplink-Client": "native"}
+        with patch.object(commercial, "PUBLIC_ORIGIN", "https://app.example.com"):
+            native = await self.client.get("/api/private", headers={**auth, "Origin": "capacitor://localhost"})
+            attacker = await self.client.get("/api/private", headers={**auth, "Origin": "https://attacker.example"})
+        self.assertEqual(native.status, 200)
+        self.assertEqual(attacker.status, 403)
 
 
 if __name__ == "__main__":
