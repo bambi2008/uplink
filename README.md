@@ -56,6 +56,21 @@ Windows 可直接双击 `启动Jake.bat`，macOS 双击 `启动Jake.command`（�
 
 手机通话时保持启动窗口运行。iPhone/安卓切到后台后，系统可能暂停麦克风；回到 Uplink 时应用会自动恢复音频和识别连接。若 iPhone 主屏幕模式偶发无法恢复麦克风，可直接在 Safari 打开同一地址继续使用。
 
+## 面向客户的商业运行模式
+
+商业模式与个人桌面模式相互隔离。客户通过公开 HTTPS 地址注册登录，不需要打开电脑，
+也不需要填写 MiniMax、讯飞或豆包凭据。供应商凭据只由云端 Secret 管理器注入；客户
+偏好、每日额度和飞行复盘按账号隔离。
+
+```bash
+docker build -t uplink .
+docker run --env-file .env.commercial -p 8800:8800 -v uplink-data:/data uplink
+```
+
+生产部署说明和上线前必做项见 [`docs/commercial-deployment.md`](docs/commercial-deployment.md)。
+`.env.commercial.example` 只包含变量名，不包含任何真实凭据。原有 `启动Jake.bat` 仍然
+启动个人桌面模式，行为不变。
+
 ## 低延迟开关
 
 P0 低延迟机制默认开启，开发或故障回滚时可在启动服务前独立关闭：

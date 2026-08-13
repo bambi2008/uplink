@@ -415,7 +415,7 @@ function credentialCollision(mm,db){
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
 const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
-let settingsReady=null, settingsLoaded=false,
+let settingsReady=null, settingsLoaded=false, commercialRuntime=false, currentAccount=null,
   serverManagedCredentials=typeof location!=='undefined'&&location.protocol==='https:'&&!['localhost','127.0.0.1'].includes(location.hostname),
   serverCredentialStatus={};
 function settingUsable(k,v){
@@ -442,9 +442,11 @@ function applyCredentialMode(){
   document.documentElement.classList.toggle('mobile-managed',serverManagedCredentials);
   if(serverManagedCredentials){
     const ready=credentialAvailable('mm_key');
-    $('mobileCredentials').textContent=ready
-      ?'手机已使用电脑端的私有通讯配置。MiniMax、讯飞和豆包凭据不会传到这台手机；需要更换时请回电脑端操作。'
-      :'电脑端尚未保存 MiniMax 通讯配置，请先在电脑上的 Uplink 通讯设置中完成配置。';
+    $('mobileCredentials').textContent=commercialRuntime
+      ?(ready?'通讯服务由 Uplink 平台统一管理。':'通讯服务正在维护，请稍后再试。')
+      :(ready
+        ?'手机已使用电脑端的私有通讯配置。MiniMax、讯飞和豆包凭据不会传到这台手机；需要更换时请回电脑端操作。'
+        :'电脑端尚未保存 MiniMax 通讯配置，请先在电脑上的 Uplink 通讯设置中完成配置。');
   }
 }
 async function saveLocalSettings(){
@@ -2105,8 +2107,46 @@ function mdToHtml(md){return md.replace(/&/g,'&amp;').replace(/</g,'&lt;')
       fl.style.transform='rotate('+(p*260)+'deg)';fl.style.opacity=(0.5*Math.sin(p*Math.PI)).toFixed(2);
       requestAnimationFrame(step);})();})();
 })();
-ensureLocalSettings();
-renderPrepCard();
+function installAccountUI(){
+  if($('accountGate'))return;
+  const style=document.createElement('style');
+  style.textContent=`
+    #accountGate{position:fixed;inset:0;z-index:10000;background:#05070c;display:none;align-items:center;justify-content:center;padding:24px;color:#f2e6ce}
+    #accountPanel{width:min(100%,390px);border:1px solid rgba(232,162,84,.38);background:#0b1018;padding:28px;border-radius:8px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+    #accountPanel h1{font-size:28px;margin:0 0 6px;font-weight:500;letter-spacing:0}
+    #accountPanel p{font-size:13px;color:#8fa3b0;margin:0 0 22px;line-height:1.6}
+    #accountPanel label{display:block;font-size:12px;color:#8fa3b0;margin:13px 0 6px}
+    #accountPanel input{width:100%;box-sizing:border-box;background:#05070c;border:1px solid #293442;color:#f2e6ce;border-radius:6px;padding:12px 13px;font-size:16px}
+    #accountPanel button{width:100%;margin-top:18px;border-radius:6px;padding:12px 14px;background:#e8a254;color:#10151d;border:0;font-weight:700;cursor:pointer}
+    #accountSwitch{display:block;text-align:center;margin-top:15px;color:#8fa3b0;font-size:13px;cursor:pointer}
+    #accountError{min-height:20px;margin-top:12px;color:#ff8f86;font-size:13px}
+    #accountBadge{position:fixed;z-index:8000;right:max(14px,env(safe-area-inset-right));top:max(48px,calc(env(safe-area-inset-top) + 36px));display:none;border:1px solid rgba(143,163,176,.35);background:rgba(5,7,12,.82);color:#8fa3b0;border-radius:6px;padding:7px 10px;font-size:12px;cursor:pointer}
+  `;
+  document.head.appendChild(style);
+  const gate=document.createElement('div');gate.id='accountGate';
+  gate.innerHTML='<form id="accountPanel"><h1>UPLINK</h1><p id="accountLead">登录后，继续和 Jake 通话。</p><div id="accountNameWrap" style="display:none"><label for="accountName">你的称呼</label><input id="accountName" autocomplete="name"></div><label for="accountEmail">邮箱</label><input id="accountEmail" type="email" autocomplete="email" required><label for="accountPassword">密码</label><input id="accountPassword" type="password" minlength="8" autocomplete="current-password" required><div id="accountError"></div><button id="accountSubmit" type="submit">登录</button><span id="accountSwitch">第一次使用？注册账号</span></form>';
+  document.body.appendChild(gate);
+  const badge=document.createElement('button');badge.id='accountBadge';badge.type='button';document.body.appendChild(badge);
+  let registering=false;
+  $('accountSwitch').onclick=()=>{registering=!registering;$('accountNameWrap').style.display=registering?'block':'none';$('accountSubmit').textContent=registering?'创建账号':'登录';$('accountLead').textContent=registering?'创建账号，开始第一次轨道通话。':'登录后，继续和 Jake 通话。';$('accountSwitch').textContent=registering?'已有账号？登录':'第一次使用？注册账号';$('accountPassword').autocomplete=registering?'new-password':'current-password';$('accountError').textContent='';};
+  $('accountPanel').onsubmit=async e=>{e.preventDefault();$('accountSubmit').disabled=true;$('accountError').textContent='';try{const body={email:$('accountEmail').value.trim(),password:$('accountPassword').value};if(registering)body.name=$('accountName').value.trim();const r=await fetch(registering?'/api/account/register':'/api/account/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw new Error(j.error||'暂时无法登录');await accountReady(j.user);}catch(err){$('accountError').textContent=err.message}finally{$('accountSubmit').disabled=false;}};
+  badge.onclick=async()=>{if(!confirm('退出当前 Uplink 账号？'))return;await fetch('/api/account/logout',{method:'POST'});location.reload();};
+}
+async function accountReady(user){
+  currentAccount=user;$('accountGate').style.display='none';$('accountBadge').style.display='block';$('accountBadge').textContent=(user.name||user.email)+' · 退出';
+  if(!sGet('user_name')&&user.name)sSet('user_name',user.name);
+  await ensureLocalSettings();renderPrepCard();
+}
+async function bootUplink(){
+  let diag=null;
+  try{const r=await fetch('/api/diag',{cache:'no-store'});if(r.ok)diag=await r.json()}catch{}
+  commercialRuntime=!!(diag&&diag.features&&diag.features.commercial);
+  if(!commercialRuntime){await ensureLocalSettings();renderPrepCard();return;}
+  installAccountUI();
+  try{const r=await fetch('/api/account/me',{cache:'no-store'});if(r.ok){const j=await r.json();await accountReady(j.user);return}}catch{}
+  $('accountGate').style.display='flex';
+}
+bootUplink();
 if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='127.0.0.1'||location.hostname==='localhost')){
   window.addEventListener('load',()=>navigator.serviceWorker.register('/service-worker.js').catch(()=>{}));
 }

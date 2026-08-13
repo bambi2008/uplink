@@ -38,6 +38,8 @@ from collections import OrderedDict, deque
 import aiohttp
 from aiohttp import web
 
+import commercial
+
 for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(Exception):
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -79,6 +81,7 @@ LOW_LATENCY = env_flag("UPLINK_LOW_LATENCY", True)
 FAST_EOT = env_flag("UPLINK_FAST_EOT", True)
 STREAM_TTS = env_flag("UPLINK_STREAM_TTS", True)
 MOBILE_MODE = env_flag("UPLINK_MOBILE_MODE", False)
+COMMERCIAL_MODE = commercial.ENABLED
 MOBILE_ACCESS_TOKEN = os.environ.get("UPLINK_MOBILE_ACCESS_TOKEN", "").strip()
 MOBILE_COOKIE = "uplink_mobile"
 CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
@@ -275,13 +278,37 @@ async def _receive_upstream_json(ws, timeout=12):
 
 # MiniMax（对话+合成）
 ENV_KEY = os.environ.get("MINIMAX_API_KEY", "")
+ENV_TTS_KEY = os.environ.get("MINIMAX_TTS_API_KEY", "")
 ENV_GROUP = os.environ.get("MINIMAX_GROUP_ID", "")
 # 讯飞（识别）：需要 APPID 和 APIKey
 ENV_XF_APPID = os.environ.get("XF_APPID", "")
 ENV_XF_APIKEY = os.environ.get("XF_APIKEY", "")
+ENV_XF_ISE_KEY = os.environ.get("XF_ISE_APIKEY", "")
+ENV_XF_ISE_SECRET = os.environ.get("XF_ISE_APISECRET", "")
+ENV_DB_APPID = os.environ.get("DOUBAO_APP_ID", "")
+ENV_DB_TOKEN = os.environ.get("DOUBAO_ACCESS_TOKEN", "")
+
+
+def _provider_settings():
+    """Return provider credentials without exposing commercial secrets to clients."""
+    if not COMMERCIAL_MODE:
+        return _read_local_settings()
+    return {
+        "mm_key": ENV_KEY,
+        "mm_tts_key": ENV_TTS_KEY or ENV_KEY,
+        "mm_group": ENV_GROUP,
+        "xf_appid": ENV_XF_APPID,
+        "xf_apikey": ENV_XF_APIKEY,
+        "xf_ise_key": ENV_XF_ISE_KEY,
+        "xf_ise_secret": ENV_XF_ISE_SECRET,
+        "db_appid": ENV_DB_APPID,
+        "db_token": ENV_DB_TOKEN,
+    }
 
 
 def key_from(req):
+    if COMMERCIAL_MODE:
+        return ENV_KEY
     auth = req.headers.get("Authorization", "")
     if isinstance(auth, str) and auth.lower().startswith("bearer "):
         supplied = auth[7:].strip()
@@ -292,12 +319,16 @@ def key_from(req):
 
 
 def group_from(req):
+    if COMMERCIAL_MODE:
+        return ENV_GROUP
     supplied = (req.headers.get("X-MM-Group") or "").strip()
     return supplied or _read_local_settings().get("mm_group", "") or ENV_GROUP
 
 
 def xf_credentials(req):
-    saved = _read_local_settings()
+    saved = _provider_settings()
+    if COMMERCIAL_MODE:
+        return saved.get("xf_appid") or ENV_XF_APPID, saved.get("xf_apikey") or ENV_XF_APIKEY
     # An explicit value is the one currently shown/typed in the page. It must
     # win over a stale disk backup, especially for "test without saving".
     appid = req.query.get("appid") or saved.get("xf_appid") or ENV_XF_APPID
@@ -496,7 +527,24 @@ def _merge_settings(current, incoming, allow_credentials=True):
 
 
 async def api_local_settings(req):
-    managed_credentials = MOBILE_MODE and _is_remote_request(req)
+    managed_credentials = COMMERCIAL_MODE or (MOBILE_MODE and _is_remote_request(req))
+    if COMMERCIAL_MODE:
+        account = commercial.user(req)
+        current = await commercial.store(req).preferences(account["id"])
+        if req.method == "GET":
+            configured = {key: bool(_provider_settings().get(key)) for key in TOKEN_SETTING_KEYS}
+            return web.json_response({"settings": current, "managed_credentials": True,
+                                      "configured": configured})
+        try:
+            body = await req.json()
+        except Exception:
+            return web.json_response({"error": "请求体不是 JSON"}, status=400)
+        incoming = body.get("settings") if isinstance(body, dict) else None
+        if not isinstance(incoming, dict):
+            return web.json_response({"error": "settings 必须是 JSON 对象"}, status=400)
+        clean = _merge_settings(current, incoming, allow_credentials=False)
+        await commercial.store(req).save_preferences(account["id"], clean)
+        return web.json_response({"ok": True, "saved": sorted(clean.keys())})
     if req.method == "GET":
         return web.json_response(_settings_for_client(_read_local_settings(), managed_credentials))
 
@@ -807,7 +855,9 @@ async def _api_tts_legacy(req):
     auth = req.headers.get("Authorization", "")
     supplied = auth[7:].strip() if isinstance(auth, str) and auth.lower().startswith("bearer ") else ""
     supplied = supplied or (req.headers.get("X-MM-Key") or "").strip()
-    saved = _read_local_settings()
+    if COMMERCIAL_MODE:
+        supplied = ""
+    saved = _provider_settings()
     key = supplied or saved.get("mm_tts_key", "") or saved.get("mm_key", "") or ENV_KEY
     group = group_from(req)
     if not key:
@@ -859,7 +909,9 @@ async def api_tts(req):
     auth = req.headers.get("Authorization", "")
     supplied = auth[7:].strip() if isinstance(auth, str) and auth.lower().startswith("bearer ") else ""
     supplied = supplied or (req.headers.get("X-MM-Key") or "").strip()
-    saved = _read_local_settings()
+    if COMMERCIAL_MODE:
+        supplied = ""
+    saved = _provider_settings()
     key = supplied or saved.get("mm_tts_key", "") or saved.get("mm_key", "") or ENV_KEY
     group = group_from(req)
     if not key:
@@ -934,7 +986,7 @@ async def ws_tts(req):
     client_ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
     await client_ws.prepare(req)
     key = key_from(req)
-    saved = _read_local_settings()
+    saved = _provider_settings()
     key = saved.get("mm_tts_key", "") or key
     if not key:
         await client_ws.send_json({"type": "error", "code": "MISSING_TTS_KEY",
@@ -1377,12 +1429,16 @@ async def api_report(req):
         return web.json_response({"report": "复盘生成超时，本次通话记录仍已保存在本机。"}, status=504)
     except (aiohttp.ClientError, OSError) as e:
         return web.json_response({"report": f"复盘接口暂时不可用：{str(e)[:120]}"}, status=502)
+    if COMMERCIAL_MODE and rep:
+        await commercial.store(req).save_report(
+            commercial.user(req)["id"], rep, convo, body.get("minutes", 0)
+        )
     return web.json_response({"report": rep})
 
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-13.mobile-pwa-1"
+BUILD = "2026-08-13.commercial-foundation-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -1461,10 +1517,10 @@ async def api_ise(req):
         body = await req.json()
     except Exception:
         return web.json_response({"ok": False, "detail": "请求体不是JSON"})
-    saved = _read_local_settings()
-    appid = body.get("appid") or saved.get("xf_appid", "")
-    key = body.get("apikey") or saved.get("xf_ise_key", "")
-    secret = body.get("apisecret") or saved.get("xf_ise_secret", "")
+    saved = _provider_settings()
+    appid = ("" if COMMERCIAL_MODE else body.get("appid")) or saved.get("xf_appid", "")
+    key = ("" if COMMERCIAL_MODE else body.get("apikey")) or saved.get("xf_ise_key", "")
+    secret = ("" if COMMERCIAL_MODE else body.get("apisecret")) or saved.get("xf_ise_secret", "")
     text = (body.get("text") or "").strip()
     pcm_b64 = body.get("pcm") or ""
     if not (appid and key and secret and text and pcm_b64):
@@ -1535,7 +1591,8 @@ async def api_diag(req):
                                            "low_latency": LOW_LATENCY,
                                            "fast_eot": FAST_EOT,
                                            "stream_tts": STREAM_TTS,
-                                           "mobile_pwa": True},
+                                           "mobile_pwa": True,
+                                           "commercial": COMMERCIAL_MODE},
                               "mobile": {"mode": MOBILE_MODE,
                                          "remote": _is_remote_request(req),
                                          "managed_credentials": MOBILE_MODE and _is_remote_request(req),
@@ -1566,7 +1623,7 @@ async def api_asr_test(req):
             if not _DB_OK:
                 out["detail"] = "server 未加载豆包模块：" + _DB_ERR
                 return web.json_response(out)
-            saved = _read_local_settings()
+            saved = _provider_settings()
             appid = req.query.get("appid") or saved.get("db_appid", "")
             token = req.query.get("token") or saved.get("db_token", "")
             if not appid or not token:
@@ -1635,8 +1692,13 @@ async def api_asr_test(req):
 
 
 def make_app():
+    middlewares = [mobile_access_middleware]
+    if COMMERCIAL_MODE:
+        middlewares.insert(0, commercial.auth_middleware)
     app = web.Application(client_max_size=1024 * 1024 * 8,
-                          middlewares=[mobile_access_middleware])
+                          middlewares=middlewares)
+    if COMMERCIAL_MODE:
+        app.cleanup_ctx.append(commercial.store_context)
     app.cleanup_ctx.append(http_client_context)
     app.on_response_prepare.append(prepare_response)
     app.router.add_get("/", index)
@@ -1647,7 +1709,8 @@ def make_app():
     app.router.add_get("/ws/tts", ws_tts)
     try:
         import doubao
-        app[doubao.SETTINGS_READER_KEY] = _read_local_settings
+        app[doubao.SETTINGS_READER_KEY] = _provider_settings
+        app[doubao.MANAGED_CREDENTIALS_KEY] = COMMERCIAL_MODE
         app.router.add_get("/ws/doubao", doubao.doubao_relay)
     except Exception as _e:
         print("豆包模块未加载：", _e)
@@ -1661,6 +1724,8 @@ def make_app():
     app.router.add_post("/api/latency", api_latency)
     app.router.add_post("/api/briefing", api_briefing)
     app.router.add_post("/api/report", api_report)
+    if COMMERCIAL_MODE:
+        commercial.add_routes(app)
     app.router.add_static("/static/", STATIC)
     return app
 

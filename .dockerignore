@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.log
+local-settings*.json
+mobile-access.json
+commercial-data
+latency-logs
+.tools
+output

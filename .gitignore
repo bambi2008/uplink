@@ -15,3 +15,5 @@ mobile-access.json
 mobile-*.log
 output/
 debug.log
+commercial-data/
+node_modules/
