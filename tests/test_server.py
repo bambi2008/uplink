@@ -60,6 +60,74 @@ class MiniMaxCredentialTests(unittest.TestCase):
             self.assertEqual(server.key_from(request), "current-key")
 
 
+class MobileSettingsIsolationTests(unittest.TestCase):
+    def test_managed_client_never_receives_credential_values(self):
+        payload = server._settings_for_client({
+            "mm_key": "chat-secret",
+            "xf_apikey": "speech-secret",
+            "db_token": "doubao-secret",
+            "user_name": "Mao",
+            "mm_pace": "normal",
+        }, managed_credentials=True)
+
+        self.assertEqual(payload["settings"], {"user_name": "Mao", "mm_pace": "normal"})
+        self.assertTrue(payload["managed_credentials"])
+        self.assertTrue(payload["configured"]["mm_key"])
+        self.assertNotIn("chat-secret", repr(payload))
+        self.assertNotIn("speech-secret", repr(payload))
+        self.assertNotIn("doubao-secret", repr(payload))
+
+    def test_mobile_preference_save_preserves_all_credentials(self):
+        current = {
+            "mm_key": "chat-secret",
+            "mm_tts_key": "voice-secret",
+            "xf_apikey": "speech-secret",
+            "db_token": "doubao-secret",
+            "user_name": "Mao",
+            "mm_pace": "normal",
+        }
+        incoming = {
+            "mm_key": "replacement-must-be-ignored",
+            "xf_apikey": "replacement-must-be-ignored",
+            "db_token": "replacement-must-be-ignored",
+            "user_name": "Jose",
+            "mm_pace": "calm",
+        }
+
+        merged = server._merge_settings(current, incoming, allow_credentials=False)
+
+        self.assertEqual(merged["mm_key"], "chat-secret")
+        self.assertEqual(merged["mm_tts_key"], "voice-secret")
+        self.assertEqual(merged["xf_apikey"], "speech-secret")
+        self.assertEqual(merged["db_token"], "doubao-secret")
+        self.assertEqual(merged["user_name"], "Jose")
+        self.assertEqual(merged["mm_pace"], "calm")
+
+    def test_pairing_token_comparison_is_exact(self):
+        with patch.object(server, "MOBILE_ACCESS_TOKEN", "phone-token"):
+            self.assertTrue(server._mobile_token_valid("phone-token"))
+            self.assertFalse(server._mobile_token_valid("phone-token "))
+            self.assertFalse(server._mobile_token_valid("wrong"))
+
+    def test_forwarded_request_is_remote(self):
+        request = FakeRequest({}, {"CF-Connecting-IP": "203.0.113.8"})
+        request.remote = "127.0.0.1"
+        self.assertTrue(server._is_remote_request(request))
+
+    def test_tailscale_serve_request_is_remote(self):
+        request = FakeRequest({}, {"Tailscale-User-Login": "owner@example.com"})
+        request.remote = "127.0.0.1"
+        self.assertTrue(server._is_remote_request(request))
+        self.assertTrue(server._request_is_https(request))
+
+    def test_mobile_mode_never_opens_remote_access_without_a_token(self):
+        request = FakeRequest({}, {"CF-Connecting-IP": "203.0.113.8"})
+        request.remote = "127.0.0.1"
+        with patch.object(server, "MOBILE_MODE", True), patch.object(server, "MOBILE_ACCESS_TOKEN", ""):
+            self.assertTrue(server._mobile_access_required(request))
+            self.assertFalse(server._mobile_request_authorized(request))
+
+
 class LatencyP0Tests(unittest.TestCase):
     def setUp(self):
         server.MODEL_NEGATIVE_CACHE.clear()

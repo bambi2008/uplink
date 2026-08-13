@@ -30,6 +30,9 @@ import contextlib
 import aiohttp
 from aiohttp import web
 
+
+SETTINGS_READER_KEY = web.AppKey("uplink_settings_reader", object)
+
 DB_HOST = "openspeech.bytedance.com"
 DB_PATH = "/api/v3/sauc/bigmodel"
 
@@ -143,8 +146,10 @@ async def doubao_relay(req):
     ws_client = web.WebSocketResponse(heartbeat=20)
     await ws_client.prepare(req)
 
-    appid = req.query.get("appid") or ENV_DB_APPID
-    token = req.query.get("token") or ENV_DB_TOKEN
+    reader = req.app.get(SETTINGS_READER_KEY)
+    saved = reader() if callable(reader) else {}
+    appid = req.query.get("appid") or saved.get("db_appid", "") or ENV_DB_APPID
+    token = req.query.get("token") or saved.get("db_token", "") or ENV_DB_TOKEN
     resource = req.query.get("resource") or ENV_DB_RESOURCE
     if not appid or not token:
         await ws_client.send_json({"type": "error", "msg": "缺少豆包 App ID / Access Token"})

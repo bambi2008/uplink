@@ -580,6 +580,7 @@ async function testScoringCannotResumeAfterHangup(){
     active:true, thinkingStartedAt:0,
     clearTimeout:()=>{}, showPartial:()=>{}, listenAgain:()=>{}, fbStop:()=>{},
     setHalo:()=>{}, setStatus:()=>{}, sGet:()=> 'configured',
+    credentialAvailable:()=>true,
     iseEvaluate:()=>new Promise(resolve=>{finishScoring=resolve;}),
     addScore:()=>{scored++;}, handleUserSpeech:()=>{handled++;},
   });

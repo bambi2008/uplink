@@ -32,6 +32,7 @@ import pathlib
 import contextlib
 import uuid
 import sys
+import ipaddress
 from collections import OrderedDict, deque
 
 import aiohttp
@@ -77,6 +78,9 @@ LATENCY_TRACE = env_flag("UPLINK_LATENCY_TRACE", False)
 LOW_LATENCY = env_flag("UPLINK_LOW_LATENCY", True)
 FAST_EOT = env_flag("UPLINK_FAST_EOT", True)
 STREAM_TTS = env_flag("UPLINK_STREAM_TTS", True)
+MOBILE_MODE = env_flag("UPLINK_MOBILE_MODE", False)
+MOBILE_ACCESS_TOKEN = os.environ.get("UPLINK_MOBILE_ACCESS_TOKEN", "").strip()
+MOBILE_COOKIE = "uplink_mobile"
 CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
     "UPLINK_CHAT_MODELS", "MiniMax-Text-01,MiniMax-M2.5-highspeed"
 ).split(",") if model.strip())
@@ -344,6 +348,80 @@ async def favicon(req):
     return web.Response(text=svg, content_type="image/svg+xml")
 
 
+def _is_remote_request(req):
+    """Treat reverse-proxied and non-loopback traffic as a phone request."""
+    if (req.headers.get("CF-Connecting-IP") or req.headers.get("X-Forwarded-For")
+            or req.headers.get("Tailscale-User-Login")):
+        return True
+    remote = str(getattr(req, "remote", "") or "").split("%", 1)[0]
+    try:
+        return not ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        return remote not in {"", "localhost"}
+
+
+def _mobile_access_required(req):
+    return MOBILE_MODE and _is_remote_request(req)
+
+
+def _mobile_token_valid(value):
+    return bool(value and MOBILE_ACCESS_TOKEN
+                and hmac.compare_digest(str(value), MOBILE_ACCESS_TOKEN))
+
+
+def _mobile_request_authorized(req):
+    supplied = req.headers.get("X-Uplink-Mobile-Token") or getattr(req, "cookies", {}).get(MOBILE_COOKIE, "")
+    return _mobile_token_valid(supplied)
+
+
+def _request_is_https(req):
+    forwarded = req.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+    return bool(getattr(req, "secure", False) or forwarded == "https"
+                or req.headers.get("Tailscale-User-Login"))
+
+
+@web.middleware
+async def mobile_access_middleware(req, handler):
+    if not _mobile_access_required(req):
+        return await handler(req)
+    if not MOBILE_ACCESS_TOKEN:
+        return web.Response(text="手机安全入口缺少配对令牌，请重新运行手机启动器。",
+                            status=503, content_type="text/plain", charset="utf-8")
+
+    pair_token = req.query.get("pair", "") if req.path == "/" else ""
+    if pair_token:
+        if not _mobile_token_valid(pair_token):
+            return web.Response(text="手机配对码无效，请重新从电脑端打开连接。", status=403,
+                                content_type="text/plain", charset="utf-8")
+        response = web.HTTPFound("/")
+        response.set_cookie(MOBILE_COOKIE, MOBILE_ACCESS_TOKEN, max_age=60 * 60 * 24 * 30,
+                            httponly=True, secure=_request_is_https(req), samesite="Strict", path="/")
+        raise response
+
+    if not _mobile_request_authorized(req):
+        return web.Response(text="这台手机尚未与 Uplink 配对，请重新扫描电脑上的连接码。",
+                            status=401, content_type="text/plain", charset="utf-8")
+    return await handler(req)
+
+
+async def service_worker(req):
+    return web.FileResponse(STATIC / "service-worker.js",
+                            headers={"Cache-Control": "no-cache, no-store, must-revalidate",
+                                     "Service-Worker-Allowed": "/"})
+
+
+async def manifest(req):
+    return web.FileResponse(STATIC / "manifest.webmanifest",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "Content-Type": "application/manifest+json"})
+
+
+async def prepare_response(req, response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "microphone=(self)")
+
+
 SAFE_SETTING_KEYS = {
     "mm_key", "mm_tts_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token", "user_name", "asr_engine", "mm_pace", "mm_tq", "mm_voice",
@@ -352,6 +430,7 @@ TOKEN_SETTING_KEYS = {
     "mm_key", "mm_tts_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token",
 }
+PREFERENCE_SETTING_KEYS = SAFE_SETTING_KEYS - TOKEN_SETTING_KEYS
 
 
 def _setting_usable(key, value):
@@ -390,9 +469,36 @@ def _read_local_settings():
             if key in SAFE_SETTING_KEYS and _setting_usable(key, value)}
 
 
+def _settings_for_client(settings, managed_credentials=False):
+    visible = {key: value for key, value in settings.items()
+               if not managed_credentials or key in PREFERENCE_SETTING_KEYS}
+    return {
+        "settings": visible,
+        "managed_credentials": managed_credentials,
+        "configured": {key: bool(settings.get(key)) for key in TOKEN_SETTING_KEYS}
+        if managed_credentials else {},
+    }
+
+
+def _merge_settings(current, incoming, allow_credentials=True):
+    clean = dict(current)
+    allowed = SAFE_SETTING_KEYS if allow_credentials else PREFERENCE_SETTING_KEYS
+    for key in allowed:
+        if key not in incoming:
+            continue
+        value = incoming.get(key)
+        if isinstance(value, str) and not value.strip():
+            clean.pop(key, None)
+            continue
+        if _setting_usable(key, value):
+            clean[key] = value.strip()
+    return clean
+
+
 async def api_local_settings(req):
+    managed_credentials = MOBILE_MODE and _is_remote_request(req)
     if req.method == "GET":
-        return web.json_response({"settings": _read_local_settings()})
+        return web.json_response(_settings_for_client(_read_local_settings(), managed_credentials))
 
     try:
         body = await req.json()
@@ -404,17 +510,8 @@ async def api_local_settings(req):
     if not isinstance(incoming, dict):
         return web.json_response({"error": "settings 必须是 JSON 对象"}, status=400)
     async with SETTINGS_LOCK:
-        clean = _read_local_settings()
-        for key in SAFE_SETTING_KEYS:
-            if key not in incoming:
-                continue
-            value = incoming.get(key)
-            if isinstance(value, str) and not value.strip():
-                clean.pop(key, None)
-                continue
-            if _setting_usable(key, value):
-                clean[key] = value.strip()
         current = _read_local_settings()
+        clean = _merge_settings(current, incoming, allow_credentials=not managed_credentials)
         if current != clean and LOCAL_SETTINGS.exists():
             backup = LOCAL_SETTINGS.with_name("local-settings.backup.json")
             backup.write_bytes(LOCAL_SETTINGS.read_bytes())
@@ -1285,7 +1382,7 @@ async def api_report(req):
 
 # ----------------------------------------------------------------- 路由
 
-BUILD = "2026-08-13.low-latency-p0"
+BUILD = "2026-08-13.mobile-pwa-1"
 
 # ----------------------------------------------------------------- 发音评测（讯飞 ISE 流式版）
 
@@ -1364,7 +1461,10 @@ async def api_ise(req):
         body = await req.json()
     except Exception:
         return web.json_response({"ok": False, "detail": "请求体不是JSON"})
-    appid = body.get("appid", ""); key = body.get("apikey", ""); secret = body.get("apisecret", "")
+    saved = _read_local_settings()
+    appid = body.get("appid") or saved.get("xf_appid", "")
+    key = body.get("apikey") or saved.get("xf_ise_key", "")
+    secret = body.get("apisecret") or saved.get("xf_ise_secret", "")
     text = (body.get("text") or "").strip()
     pcm_b64 = body.get("pcm") or ""
     if not (appid and key and secret and text and pcm_b64):
@@ -1434,7 +1534,12 @@ async def api_diag(req):
                               "features": {"latency_trace": LATENCY_TRACE,
                                            "low_latency": LOW_LATENCY,
                                            "fast_eot": FAST_EOT,
-                                           "stream_tts": STREAM_TTS},
+                                           "stream_tts": STREAM_TTS,
+                                           "mobile_pwa": True},
+                              "mobile": {"mode": MOBILE_MODE,
+                                         "remote": _is_remote_request(req),
+                                         "managed_credentials": MOBILE_MODE and _is_remote_request(req),
+                                         "secure_context": _request_is_https(req)},
                               "chat_models": list(CHAT_MODELS)})
 
 
@@ -1530,14 +1635,19 @@ async def api_asr_test(req):
 
 
 def make_app():
-    app = web.Application(client_max_size=1024 * 1024 * 8)
+    app = web.Application(client_max_size=1024 * 1024 * 8,
+                          middlewares=[mobile_access_middleware])
     app.cleanup_ctx.append(http_client_context)
+    app.on_response_prepare.append(prepare_response)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)
+    app.router.add_get("/manifest.webmanifest", manifest)
+    app.router.add_get("/service-worker.js", service_worker)
     app.router.add_get("/ws/asr", ws_asr)
     app.router.add_get("/ws/tts", ws_tts)
     try:
         import doubao
+        app[doubao.SETTINGS_READER_KEY] = _read_local_settings
         app.router.add_get("/ws/doubao", doubao.doubao_relay)
     except Exception as _e:
         print("豆包模块未加载：", _e)

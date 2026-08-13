@@ -8,22 +8,28 @@
   }
 </script>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#05070c">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Uplink">
 <title>Uplink · 和 Jake 通话</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/app-icon-192.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2305070c'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23e8a254' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%237fb585'/%3E%3Cpath d='M32 4v12M32 48v12M4 32h12M48 32h12' stroke='%238fa3b0' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root{
     --paper:#E9EEF2; --fog:#8FA3B0; --amber:#E8A254; --danger:#D9705F; --green:#7FB585;
     --steel:#2C3E4E; --deep:#05070C;
-    --disp:"Fraunces",serif; --mono:"IBM Plex Mono",monospace;
+    --disp:Georgia,"Times New Roman",serif; --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
     --body:"Inter","PingFang SC","Microsoft YaHei",sans-serif;
   }
   *{margin:0;padding:0;box-sizing:border-box}
-  html,body{height:100%;overflow:hidden}
-  body{background:#04060B;color:var(--paper);font-family:var(--mono)}
-  .scene{position:fixed;inset:0;background:radial-gradient(130% 100% at 74% 24%,#0d1420 0%,#05070C 55%)}
+  html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+  body{background:#04060B;color:var(--paper);font-family:var(--mono);touch-action:manipulation}
+  .scene{position:fixed;inset:0;min-height:100dvh;background:radial-gradient(130% 100% at 74% 24%,#0d1420 0%,#05070C 55%)}
   svg.sky{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
   .hud-top{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;pointer-events:none;
     padding:20px 30px;font-size:12px;letter-spacing:.22em;color:#5C6B78;z-index:5}
@@ -127,9 +133,43 @@
   #reportBody h3{font-size:16px;margin:18px 0 8px;color:var(--amber)}
   #reportBody li{margin:6px 0 6px 18px}
   #reportBody code{font-family:var(--mono);background:rgba(233,238,242,.07);padding:1px 6px;border-radius:4px;font-size:13px}
+  .mobile-credentials{display:none;padding:13px 14px;margin-bottom:14px;border:1px solid rgba(127,181,133,.35);
+    border-radius:8px;background:rgba(127,181,133,.08);color:var(--fog);font-size:12.5px;line-height:1.7}
+  .mobile-managed .mobile-credentials{display:block}
+  .mobile-managed .credential-fields{display:none}
 
   @media (prefers-reduced-motion:reduce){.wv,#earthRot,.floaty{animation:none}}
   @media (max-width:900px){.panel{width:100%}.name{font-size:26px}.hud-line{left:50%;max-width:80%}}
+  @media (max-width:600px){
+    .hud-top{padding:max(14px,env(safe-area-inset-top)) 16px 0;font-size:9px;letter-spacing:.12em}
+    .hud-top span:last-child{max-width:46%;text-align:right}
+    svg.sky{height:64%;transform:translateY(1%)}
+    .panel{padding:16px max(18px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left));
+      background:rgba(4,6,11,.88)}
+    .kicker{margin-bottom:8px}.who{margin-bottom:8px}.badge{width:48px;height:48px}.name{font-size:25px}
+    .wave{height:24px;margin:9px 0 10px}.wv{width:5px}
+    .conn{font-size:10px;letter-spacing:.08em;margin-bottom:4px}.timer{margin-bottom:9px}
+    .controls{width:100%}.primaryBtn{min-height:52px;width:100%;padding:14px 18px;border-radius:8px}
+    #btnEnd{min-height:48px;width:100%;border-radius:8px;padding:12px 18px}
+    .hint{font-size:10.5px;line-height:1.55;margin-top:8px}.links{margin-top:7px;justify-content:center}
+    .linkish{min-height:44px;padding:10px 12px}.corner{display:none}
+    .hud-line{left:50%;bottom:43%;width:calc(100% - 34px);max-width:none;font-size:21px;line-height:1.4}
+    .hud-line .tag{font-size:10px;margin-bottom:5px}.drawer-tab{top:37%;padding:13px 8px}
+    .drawer{width:100%;max-width:none;padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}
+    #log{font-size:20px;gap:16px}.overlay{padding:0;align-items:flex-end}
+    .sheet{width:100%;max-height:92dvh;border-radius:8px 8px 0 0;padding:24px max(20px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+    .sheet input{font-size:16px;min-height:48px}.sheet button{min-height:44px}
+    #prepCard{max-height:86px;overflow:hidden}
+  }
+  @media (max-width:600px) and (max-height:700px){
+    .who{margin-bottom:4px}.wave{display:none}.hint{display:none}.hud-line{bottom:45%;font-size:18px}
+    #prepCard{display:none!important}.panel{padding-top:10px}
+  }
+  @media (orientation:landscape) and (max-height:520px){
+    svg.sky{height:100%;width:68%;right:0;left:auto}.panel{width:46%;padding-top:max(12px,env(safe-area-inset-top))}
+    .hud-line{left:70%;bottom:24px;width:52%;font-size:18px}.hud-top{font-size:9px}.corner{display:none}
+    .wave{display:none}.hint{display:none}
+  }
 </style>
 </head>
 <body>
@@ -262,17 +302,22 @@
   <div class="overlay" id="keyOverlay">
     <div class="sheet">
       <h2>通讯设置</h2>
-      <div class="sub">
-        填入你的 MiniMax API Key（<a href="https://platform.minimaxi.com" target="_blank">platform.minimaxi.com</a> 注册充值后在「接口密钥」页创建）。<br>
-        钥匙只保存在你本机浏览器里，通过你自己电脑上的后端与服务通信。
+      <div class="mobile-credentials" id="mobileCredentials">
+        手机已使用电脑端的私有通讯配置。MiniMax、讯飞和豆包凭据不会传到这台手机；需要更换时请回电脑端操作。
       </div>
-      <label>MiniMax API Key（必填）</label>
-      <input id="keyInput" type="password" placeholder="粘贴你的 MiniMax API Key">
-      <label>MiniMax 语音 API Key（可选）</label>
-      <input id="ttsKeyInput" type="password" placeholder="语音专用 Key；留空则沿用上面的 Key">
-      <div style="font-size:11.5px;color:var(--fog);line-height:1.6;margin-top:4px">如果试听提示 1004，请在 MiniMax「接口密钥」里创建有语音额度的 API Key 填这里；上面的聊天 Key 不用更换。</div>
-      <label>GroupId（选填）</label>
-      <input id="groupInput" type="text" placeholder="可留空">
+      <div class="credential-fields" id="miniMaxCredentials">
+        <div class="sub">
+          填入你的 MiniMax API Key（<a href="https://platform.minimaxi.com" target="_blank">platform.minimaxi.com</a> 注册充值后在「接口密钥」页创建）。<br>
+          钥匙只保存在你本机浏览器里，通过你自己电脑上的后端与服务通信。
+        </div>
+        <label>MiniMax API Key（必填）</label>
+        <input id="keyInput" type="password" placeholder="粘贴你的 MiniMax API Key">
+        <label>MiniMax 语音 API Key（可选）</label>
+        <input id="ttsKeyInput" type="password" placeholder="语音专用 Key；留空则沿用上面的 Key">
+        <div style="font-size:11.5px;color:var(--fog);line-height:1.6;margin-top:4px">如果试听提示 1004，请在 MiniMax「接口密钥」里创建有语音额度的 API Key 填这里；上面的聊天 Key 不用更换。</div>
+        <label>GroupId（选填）</label>
+        <input id="groupInput" type="text" placeholder="可留空">
+      </div>
       <label style="margin-top:18px">你的英文名（Jake 打招呼时怎么称呼你）</label>
       <input id="unName" type="text" placeholder="比如 Jose 或 Mao Qin（会自动首字母大写）">
       <label style="margin-top:18px">识别引擎（Jake 用哪只耳朵听你说）</label>
@@ -284,7 +329,7 @@
       <button id="btnAsrTest" type="button" style="margin-top:10px;padding:8px 14px;border-radius:10px;border:1px solid rgba(127,181,133,.5);background:rgba(127,181,133,.12);color:var(--green);font-size:13px;cursor:pointer">🔌 测试所选引擎的连接（不用先保存）</button>
       <div id="asrTestOut" style="font-size:12.5px;line-height:1.7;margin-top:8px;color:var(--fog);white-space:pre-wrap"></div>
 
-      <div style="margin-top:18px;padding:16px 16px 4px;border-radius:12px;background:rgba(232,162,84,.08);border:1px solid rgba(232,162,84,.3)">
+      <div class="credential-fields" id="xfCredentials" style="margin-top:18px;padding:16px 16px 4px;border-radius:8px;background:rgba(232,162,84,.08);border:1px solid rgba(232,162,84,.3)">
         <div style="font-size:15px;font-weight:600;color:var(--amber);margin-bottom:4px">🎤 讯飞语音识别（让 Jake 听得稳）</div>
         <div style="font-size:12px;color:var(--fog);line-height:1.7;margin-bottom:6px">去 <a href="https://www.xfyun.cn" target="_blank">xfyun.cn</a> 注册 → 创建应用 → 开通「实时语音转写」→ 复制 APPID 和 APIKey。有免费额度，够用很久。不填则用浏览器识别（可能掉线）。</div>
         <label style="margin-top:6px">讯飞 APPID</label>
@@ -300,7 +345,7 @@
           <input id="xfIseSecret" type="password" placeholder="WebAPI 的 APISecret">
         </div>
       </div>
-      <div style="margin-top:14px;padding:16px 16px 4px;border-radius:12px;background:rgba(127,181,133,.08);border:1px solid rgba(127,181,133,.3)">
+      <div class="credential-fields" id="dbCredentials" style="margin-top:14px;padding:16px 16px 4px;border-radius:8px;background:rgba(127,181,133,.08);border:1px solid rgba(127,181,133,.3)">
         <div style="font-size:15px;font-weight:600;color:var(--green);margin-bottom:4px">🎤 豆包语音识别（火山引擎 · 大模型流式）</div>
         <div style="font-size:12px;color:var(--fog);line-height:1.7;margin-bottom:6px">去 <a href="https://console.volcengine.com/speech/app" target="_blank">火山引擎语音控制台</a> 创建应用 → 勾选「语音识别大模型 / 流式」→ 复制 App ID 和 Access Token。有免费额度。</div>
         <label style="margin-top:6px">豆包 App ID</label>
@@ -354,6 +399,7 @@ const SESSION_MIN=30, WRAP_MIN=26;
 let mem={};
 function sGet(k){try{return localStorage.getItem(k)||''}catch{return mem[k]||''}}
 function sSet(k,v){mem[k]=v;try{localStorage.setItem(k,v)}catch{}}
+function sDel(k){delete mem[k];try{localStorage.removeItem(k)}catch{}}
 function cleanToken(v){return String(v||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim()}
 function latinHeaderOk(v){return /^[\x20-\x7E]*$/.test(v||'')}
 function tokenProblem(label,v){
@@ -369,7 +415,9 @@ function credentialCollision(mm,db){
 function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
 const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
-let settingsReady=null, settingsLoaded=false;
+let settingsReady=null, settingsLoaded=false,
+  serverManagedCredentials=typeof location!=='undefined'&&location.protocol==='https:'&&!['localhost','127.0.0.1'].includes(location.hostname),
+  serverCredentialStatus={};
 function settingUsable(k,v){
   const value=cleanToken(v);
   if(!value) return false;
@@ -383,8 +431,21 @@ function settingUsable(k,v){
 }
 function collectSettings(){
   const out={};
-  SETTING_KEYS.forEach(k=>{ out[k]=sGet(k); });
+  SETTING_KEYS.forEach(k=>{ if(!serverManagedCredentials||!TOKEN_SETTING_KEYS.has(k))out[k]=sGet(k); });
   return out;
+}
+function credentialAvailable(key){
+  return serverManagedCredentials?!!serverCredentialStatus[key]:!!sGet(key);
+}
+function applyCredentialMode(){
+  if(typeof document==='undefined')return;
+  document.documentElement.classList.toggle('mobile-managed',serverManagedCredentials);
+  if(serverManagedCredentials){
+    const ready=credentialAvailable('mm_key');
+    $('mobileCredentials').textContent=ready
+      ?'手机已使用电脑端的私有通讯配置。MiniMax、讯飞和豆包凭据不会传到这台手机；需要更换时请回电脑端操作。'
+      :'电脑端尚未保存 MiniMax 通讯配置，请先在电脑上的 Uplink 通讯设置中完成配置。';
+  }
 }
 async function saveLocalSettings(){
   try{
@@ -396,6 +457,10 @@ async function restoreLocalSettings(){
     const r=await fetchLocal('/api/local_settings',null,'本地设置恢复接口');
     if(!r.ok) return false;
     const j=await r.json(), settings=j.settings||{};
+    serverManagedCredentials=!!j.managed_credentials;
+    serverCredentialStatus=j.configured||{};
+    if(serverManagedCredentials)TOKEN_SETTING_KEYS.forEach(sDel);
+    applyCredentialMode();
     let restored=0;
     SETTING_KEYS.forEach(k=>{
       if(settingUsable(k,settings[k])){
@@ -418,6 +483,9 @@ function ensureLocalSettings(){
 }
 function localServerHint(){
   const here=location.origin&&location.origin!=='null'?location.origin:'file://';
+  if(serverManagedCredentials||location.protocol==='https:'){
+    return '当前手机地址：'+here+'。请确认电脑端的「启动手机端」窗口仍在运行；地址失效时重新扫描电脑上的连接码。';
+  }
   return '当前页面地址：'+here+'。请固定用 http://127.0.0.1:8800/ 打开；如果之前用 localhost 填过密钥，浏览器会把它当成另一个站点，需要重新填一次。';
 }
 async function fetchLocal(path, opts, label){
@@ -439,9 +507,11 @@ async function asrTest(){
     const dj=await dg.json();
     if(eng==='db' && !dj.doubao_loaded){ out.style.color='var(--amber)';
       out.textContent='❌ server 没加载豆包模块：'+(dj.doubao_error||'doubao.py 不在 server.py 旁边')+'\n把 doubao.py 放到 server.py 同一文件夹后，重启启动脚本。'; return; }
-    let q;
-    if(eng==='db') q='engine=db&appid='+encodeURIComponent($('dbAppid').value.trim())+'&token='+encodeURIComponent($('dbToken').value.trim());
-    else q='engine=xf&appid='+encodeURIComponent($('xfAppid').value.trim())+'&apikey='+encodeURIComponent($('xfApikey').value.trim());
+    let q='engine='+encodeURIComponent(eng);
+    if(!serverManagedCredentials){
+      if(eng==='db') q+='&appid='+encodeURIComponent($('dbAppid').value.trim())+'&token='+encodeURIComponent($('dbToken').value.trim());
+      else q+='&appid='+encodeURIComponent($('xfAppid').value.trim())+'&apikey='+encodeURIComponent($('xfApikey').value.trim());
+    }
     const r=await fetchLocal('/api/asr_test?'+q, null, '识别测试接口'); const j=await r.json();
     out.style.color=j.ok?'var(--green)':'var(--amber)';
     out.textContent=(j.ok?'✅ ':'❌ ')+j.detail+'\n（server build '+dj.build+'，豆包模块'+(dj.doubao_loaded?'已加载':'未加载')+'）';
@@ -493,6 +563,10 @@ function setHalo(s){
   else { pingStop(); hudHide(); }
 }
 function validateKeysForCall(){
+  if(serverManagedCredentials){
+    if(!credentialAvailable('mm_key'))throw new Error('电脑端尚未配置 MiniMax API Key，请先回电脑端完成通讯设置。');
+    return;
+  }
   const mm=cleanToken(sGet('mm_key')), group=cleanToken(sGet('mm_group'));
   const problems=[tokenProblem('MiniMax API Key',mm)];
   if(group) problems.push(tokenProblem('MiniMax GroupId',group));
@@ -501,6 +575,7 @@ function validateKeysForCall(){
 }
 function hdrs(extra,keyOverride){
   const h={'Content-Type':'application/json'}, mm=cleanToken(keyOverride||sGet('mm_key')), group=cleanToken(sGet('mm_group'));
+  if(serverManagedCredentials)return Object.assign(h,extra||{});
   if(!latinHeaderOk(mm)||!latinHeaderOk(group)) throw new Error('MiniMax API Key / GroupId 含有非英文字符，请点「通讯设置」重新粘贴。');
   h['X-MM-Key']=mm;
   h['Authorization']='Bearer '+mm;
@@ -652,6 +727,7 @@ class StreamingReplyPlayer{
     this.firstChunk=false; this.hasPlayed=false; this.failed=false; this.cancelled=false;
     this.fallbackStarted=false; this.playPending=false; this.objectUrl=''; this.firstChunkTimer=null;
     this.mediaSource=new MediaSource(); this.audio=new Audio();
+    this.audio.playsInline=true;
     this.objectUrl=URL.createObjectURL(this.mediaSource); this.audio.src=this.objectUrl;
     this.audio.preload='auto'; this.audio.onplaying=()=>this.onPlaying();
     this.audio.onended=()=>this.onEnded(); this.audio.onerror=()=>this.fail('audio playback failed');
@@ -817,6 +893,7 @@ class StreamingReplyPlayer{
 /* ---------- 设置弹窗 ---------- */
 $('btnKey').onclick=async ()=>{
   await ensureLocalSettings();
+  applyCredentialMode();
   $('keyInput').value=sGet('mm_key'); $('ttsKeyInput').value=sGet('mm_tts_key'); $('groupInput').value=sGet('mm_group');
   $('xfAppid').value=sGet('xf_appid'); $('xfApikey').value=sGet('xf_apikey');
   $('dbAppid').value=sGet('db_appid'); $('dbToken').value=sGet('db_token');
@@ -828,6 +905,7 @@ $('btnKey').onclick=async ()=>{
   document.querySelectorAll('input[name=paceMode]').forEach(r=>r.checked=(r.value===pace));
   const tq=sGet('mm_tq')||'hd';
   document.querySelectorAll('input[name=tqMode]').forEach(r=>r.checked=(r.value===tq));
+  $('btnAsrTest').textContent=serverManagedCredentials?'测试电脑端识别连接':'测试所选引擎的连接（不用先保存）';
   renderVoices(); $('keyOverlay').style.display='flex';
 };
 function renderVoices(){
@@ -841,18 +919,32 @@ function renderVoices(){
   box.onclick=async e=>{
     const b=e.target.closest('button'); if(!b)return; e.preventDefault();
     const auditionKey=cleanToken($('ttsKeyInput').value)||cleanToken($('keyInput').value);
-    if(!auditionKey){alert('先填 MiniMax API Key 才能试听');return;}
-    if(tokenProblem('MiniMax API Key',auditionKey)){alert(tokenProblem('MiniMax API Key',auditionKey));return;}
-    if(credentialCollision(auditionKey,$('dbToken').value)){
+    if(!serverManagedCredentials&&!auditionKey){alert('先填 MiniMax API Key 才能试听');return;}
+    if(!serverManagedCredentials&&tokenProblem('MiniMax API Key',auditionKey)){alert(tokenProblem('MiniMax API Key',auditionKey));return;}
+    if(!serverManagedCredentials&&credentialCollision(auditionKey,$('dbToken').value)){
       alert('MiniMax API Key 和豆包 Access Token 不能是同一个值。当前两栏被填成了一样，请重新复制 MiniMax 的接口密钥。'); return;
     }
     const old=b.textContent; b.textContent='…'; b.disabled=true;
-    try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '', null, auditionKey);
-      const a=new Audio(URL.createObjectURL(blob)); a.onended=()=>{b.textContent=old;b.disabled=false}; await a.play();
+    try{ const blob=await tts("Hey, it's Jake! Good to hear you. How's your week been going?", b.dataset.vid, '', null, serverManagedCredentials?null:auditionKey);
+      const url=URL.createObjectURL(blob), a=new Audio(url); a.playsInline=true;
+      a.onended=()=>{URL.revokeObjectURL(url);b.textContent=old;b.disabled=false}; await a.play();
     }catch(err){alert('试听失败：'+err.message);b.textContent=old;b.disabled=false}
   };
 }
+function savePreferenceFields(){
+  sSet('user_name',$('unName').value.trim().replace(/\b[a-z]/g,c=>c.toUpperCase()));
+  const eng=document.querySelector('input[name=asrEngine]:checked'); sSet('asr_engine',eng?eng.value:'xf');
+  const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
+  const tq=document.querySelector('input[name=tqMode]:checked'); sSet('mm_tq',tq?tq.value:'hd');
+  const voice=document.querySelector('input[name=voicePick]:checked'); if(voice)sSet('mm_voice',voice.value);
+}
 $('keySave').onclick=async ()=>{
+  if(serverManagedCredentials){
+    savePreferenceFields();
+    await saveLocalSettings();
+    $('keyOverlay').style.display='none'; setStatus('手机偏好已保存，电脑端通讯凭据保持不变。');
+    return;
+  }
   const v=cleanToken($('keyInput').value); if(!v){alert('请粘贴 MiniMax API Key');return;}
   const ttsKey=cleanToken($('ttsKeyInput').value);
   const g=cleanToken($('groupInput').value);
@@ -868,12 +960,8 @@ $('keySave').onclick=async ()=>{
   sSet('mm_key',v); sSet('mm_tts_key',ttsKey); sSet('mm_group',g);
   sSet('xf_appid',cleanToken($('xfAppid').value)); sSet('xf_apikey',cleanToken($('xfApikey').value));
   sSet('db_appid',cleanToken($('dbAppid').value)); sSet('db_token',dbToken);
-  sSet('user_name',$('unName').value.trim().replace(/\b[a-z]/g,c=>c.toUpperCase()));
   sSet('xf_ise_key',xfIseKey); sSet('xf_ise_secret',xfIseSecret);
-  const eng=document.querySelector('input[name=asrEngine]:checked'); sSet('asr_engine',eng?eng.value:'xf');
-  const pace=document.querySelector('input[name=paceMode]:checked'); sSet('mm_pace',pace?pace.value:'normal');
-  const tq=document.querySelector('input[name=tqMode]:checked'); sSet('mm_tq',tq?tq.value:'hd');
-  const voice=document.querySelector('input[name=voicePick]:checked'); if(voice)sSet('mm_voice',voice.value);
+  savePreferenceFields();
   await saveLocalSettings();
   $('keyOverlay').style.display='none'; setStatus('设置已保存 ✓ 已同步到本机私有设置，可以打电话了。'+(iseIgnored?' 讯飞发音评测凭据不完整，已保持关闭。':''));
 };
@@ -1076,6 +1164,7 @@ let stopCurrentAudio=()=>{};
 function playBlob(blob,meta){
   return new Promise(res=>{
     const url=URL.createObjectURL(blob), audio=new Audio(url);
+    audio.playsInline=true;
     let done=false, unlockHandler=null;
     const finish=()=>{
       if(done)return;
@@ -1268,8 +1357,8 @@ function connectASR(){
   const pref=sGet('asr_engine')||'xf';
   if(!engQ||!engQ.length){
     engQ=[]; engineFailures=[];
-    const has={db:!!(sGet('db_appid')&&sGet('db_token')),
-      xf:settingUsable('xf_appid',sGet('xf_appid'))&&settingUsable('xf_apikey',sGet('xf_apikey'))};
+    const has={db:credentialAvailable('db_appid')&&credentialAvailable('db_token'),
+      xf:credentialAvailable('xf_appid')&&credentialAvailable('xf_apikey')};
     [pref, pref==='db'?'xf':'db'].forEach(e=>{ if(has[e]) engQ.push(e); });
     if(!engQ.length){ startFallbackASR('豆包和讯飞的凭据都未填写'); return; }
   }
@@ -1277,9 +1366,11 @@ function connectASR(){
   const proto=location.protocol==='https:'?'wss':'ws';
   let url;
   if(engine==='db'){
-    url=proto+'://'+location.host+'/ws/doubao?appid='+encodeURIComponent(sGet('db_appid'))+'&token='+encodeURIComponent(sGet('db_token'));
+    url=proto+'://'+location.host+'/ws/doubao';
+    if(!serverManagedCredentials)url+='?appid='+encodeURIComponent(sGet('db_appid'))+'&token='+encodeURIComponent(sGet('db_token'));
   }else{
-    url=proto+'://'+location.host+'/ws/asr?appid='+encodeURIComponent(sGet('xf_appid'))+'&apikey='+encodeURIComponent(sGet('xf_apikey'));
+    url=proto+'://'+location.host+'/ws/asr';
+    if(!serverManagedCredentials)url+='?appid='+encodeURIComponent(sGet('xf_appid'))+'&apikey='+encodeURIComponent(sGet('xf_apikey'));
   }
   let ws;
   try{ ws=new WebSocket(url); }
@@ -1528,7 +1619,7 @@ async function finishTurn(force=false){
   const phrase=pendingEcho; pendingEcho=null;
   const chunks=echoChunks; echoChunks=[];
   const nSamples=chunks.reduce((n,c)=>n+c.length,0);
-  if(phrase&&nSamples>=6400&&sGet('xf_ise_key')&&sGet('xf_ise_secret')&&sGet('xf_appid')){
+  if(phrase&&nSamples>=6400&&credentialAvailable('xf_ise_key')&&credentialAvailable('xf_ise_secret')&&credentialAvailable('xf_appid')){
     setStatus('SCORING · 正在评测你的发音…');
     const rep=await iseEvaluate(phrase,chunks);
     if(turnVersion!==interruptVersion||!active)return;
@@ -1551,8 +1642,9 @@ function pcmToB64(chunks){
 async function iseEvaluate(phrase,chunks){
   const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
   try{
+    const credentials=serverManagedCredentials?{}:{appid:sGet('xf_appid'),apikey:sGet('xf_ise_key'),apisecret:sGet('xf_ise_secret')};
     const r=await fetchLocal('/api/ise',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
-      body:JSON.stringify({appid:sGet('xf_appid'),apikey:sGet('xf_ise_key'),apisecret:sGet('xf_ise_secret'),
+      body:JSON.stringify({...credentials,
                            text:phrase,pcm:pcmToB64(chunks)})}, '发音评测接口');
     const j=await r.json();
     if(!j.ok){ console.warn('评测失败:',j.detail); addScore('📊 发音评测没成功：'+(j.detail||'未知原因')); return null; }
@@ -1744,11 +1836,51 @@ function resetCallRuntime(){
   lastAsrUpdateAt=0; lastAsrFinalAt=0; lastAsrWasFinal=false; lastVoiceActivityAt=0; lastInterimText=''; eotCandidateAt=0;
 }
 
+let wakeLock=null, mobileResumeBusy=false;
+function primeMediaForGesture(){
+  try{const context=ac();if(context&&context.state==='suspended')context.resume().catch(()=>{});}catch{}
+}
+async function requestCallWakeLock(){
+  if(!active||document.hidden||!navigator.wakeLock||wakeLock)return;
+  try{
+    wakeLock=await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release',()=>{wakeLock=null},{once:true});
+  }catch{}
+}
+async function recoverMobileSession(){
+  if(!active||document.hidden||mobileResumeBusy)return;
+  mobileResumeBusy=true;
+  try{
+    await requestCallWakeLock();
+    for(const context of [AC,audioCtx]){
+      if(context&&context.state==='suspended')await context.resume().catch(()=>{});
+    }
+    const micAlive=micStream&&micStream.getAudioTracks().some(track=>track.readyState==='live');
+    if(!micAlive){
+      await openMic();
+      if(!usingFallback&&(phase==='listening'||phase==='speaking'))connectASR();
+    }else if(!usingFallback&&phase==='listening'&&(!asrWS||asrWS.readyState>1)){
+      connectASR();
+    }
+    if(phase==='speaking'&&curAudio&&curAudio.paused){
+      curAudio.play().catch(()=>setStatus('声音已暂停，点一下页面继续通话。'));
+    }
+  }finally{mobileResumeBusy=false;}
+}
+if(typeof document!=='undefined')document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden)recoverMobileSession();
+});
+if(typeof window!=='undefined')window.addEventListener('pageshow',event=>{if(event.persisted)recoverMobileSession();});
+
 async function startCall(){
   if(active||starting||$('btnStart').disabled) return;   // 防重复触发
+  primeMediaForGesture();
   starting=true;
-  try{ await ensureLocalSettings(); }catch(e){ starting=false; setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
-  if(!sGet('mm_key')){ starting=false; $('keyOverlay').style.display='flex'; return; }
+  try{
+    const settingsOk=await ensureLocalSettings();
+    if(!settingsOk&&serverManagedCredentials){starting=false;setStatus('⚠️ 手机暂时连不上电脑端设置，请确认手机启动窗口仍在运行后重试。');return;}
+  }catch(e){ starting=false; setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
+  if(!credentialAvailable('mm_key')){ starting=false; applyCredentialMode(); $('keyOverlay').style.display='flex'; return; }
   try{ validateKeysForCall(); }catch(e){ starting=false; setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
   resetCallRuntime();
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
@@ -1778,6 +1910,7 @@ async function startCall(){
     /* 第3步：识别通道 */
     step(3,'连接识别通道…');
     active=true;
+    requestCallWakeLock();
     connectASR();
     $('btnStart').style.display='none'; $('btnEnd').style.display='inline-block';
     $('timer').style.display='block';
@@ -1838,6 +1971,7 @@ function cleanup(){
   engQ=null; engineFailures=[]; engineFailing=false;
   ackBlobs=[]; fillerBlobs=[]; fillersReady=false; lastFiller=-1; lastAck=-1;
   fbLang='zh-CN'; asrOk=false; asrAcceptingAudio=false; asrTries=0; earDiag('');
+  if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}
 }
 async function endCall(showReport){
   if(!active)return;
@@ -1973,6 +2107,9 @@ function mdToHtml(md){return md.replace(/&/g,'&amp;').replace(/</g,'&lt;')
 })();
 ensureLocalSettings();
 renderPrepCard();
+if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='127.0.0.1'||location.hostname==='localhost')){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('/service-worker.js').catch(()=>{}));
+}
 </script>
 </body>
 </html>

@@ -10,3 +10,8 @@ latency-logs/
 claude-export/
 briefings/
 .playwright-cli/
+.tools/
+mobile-access.json
+mobile-*.log
+output/
+debug.log
