@@ -7,7 +7,8 @@
     "mobile:build": "node scripts/build-mobile.mjs",
     "mobile:add:android": "npx cap add android",
     "mobile:add:ios": "npx cap add ios",
-    "mobile:sync": "npm run mobile:build && npx cap sync"
+    "mobile:sync": "npm run mobile:build && npx cap sync",
+    "mobile:test": "node tests/turn-taking.test.mjs && node tests/settings.test.mjs && node tests/native-build.test.mjs"
   },
   "dependencies": {
     "@aparajita/capacitor-secure-storage": "^8.0.0",

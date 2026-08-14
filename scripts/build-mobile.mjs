@@ -6,9 +6,18 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const output = path.join(root, 'www')
 const apiOrigin = String(process.env.UPLINK_API_ORIGIN || '').replace(/\/$/, '')
+let parsedOrigin
 
-if (!/^https:\/\/[^/]+/.test(apiOrigin)) {
+try { parsedOrigin = new URL(apiOrigin) } catch { parsedOrigin = null }
+if (!parsedOrigin || parsedOrigin.protocol !== 'https:' || parsedOrigin.origin !== apiOrigin || parsedOrigin.username || parsedOrigin.password) {
   throw new Error('Set UPLINK_API_ORIGIN to the production HTTPS origin before building the mobile app')
+}
+const releaseHost = parsedOrigin.hostname.toLowerCase()
+const placeholderHost = releaseHost === 'localhost' || releaseHost.endsWith('.localhost') ||
+  releaseHost.endsWith('.invalid') || releaseHost.endsWith('.test') ||
+  /(^|\.)example\.(com|org|net)$/.test(releaseHost)
+if (process.env.UPLINK_RELEASE_BUILD === '1' && placeholderHost) {
+  throw new Error('A release build cannot use a local or placeholder API origin')
 }
 
 await rm(output, { recursive: true, force: true })

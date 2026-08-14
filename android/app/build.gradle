@@ -1,5 +1,17 @@
 apply plugin: 'com.android.application'
 
+def env = System.getenv()
+def releaseSigningValues = [
+    env['UPLINK_ANDROID_KEYSTORE'],
+    env['UPLINK_ANDROID_KEYSTORE_PASSWORD'],
+    env['UPLINK_ANDROID_KEY_ALIAS'],
+    env['UPLINK_ANDROID_KEY_PASSWORD'],
+]
+def releaseSigningReady = releaseSigningValues.every { it != null && !it.trim().isEmpty() }
+if (env['UPLINK_REQUIRE_ANDROID_SIGNING'] == '1' && !releaseSigningReady) {
+    throw new GradleException('Release signing is required but the UPLINK_ANDROID_* signing variables are incomplete')
+}
+
 android {
     namespace = "com.bambi2008.uplink"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +19,8 @@ android {
         applicationId "com.bambi2008.uplink"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode Integer.parseInt(env.getOrDefault('UPLINK_ANDROID_VERSION_CODE', '1'))
+        versionName env.getOrDefault('UPLINK_ANDROID_VERSION_NAME', '1.0')
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +28,23 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (releaseSigningReady) {
+            release {
+                storeFile file(env['UPLINK_ANDROID_KEYSTORE'])
+                storePassword env['UPLINK_ANDROID_KEYSTORE_PASSWORD']
+                keyAlias env['UPLINK_ANDROID_KEY_ALIAS']
+                keyPassword env['UPLINK_ANDROID_KEY_PASSWORD']
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (releaseSigningReady) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }

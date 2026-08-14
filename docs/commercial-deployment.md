@@ -55,6 +55,43 @@ npm install
 npm run mobile:sync
 ```
 
+### Windows Android release
+
+The Windows build machine uses JDK 21, Android API 36, Build Tools 36.0.0, and
+the checked-in Gradle wrapper. Generate the branded native assets after changing
+the source app icon:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-native-assets.ps1
+```
+
+Create and inspect a debug APK against a test cloud endpoint:
+
+```powershell
+scripts\build-android.cmd -ApiOrigin https://staging.example.cn -Configuration Debug -VersionCode 1 -VersionName 1.0.0
+```
+
+For a Google Play AAB, keep the upload keystore outside the repository and set
+the four signing variables only in the current terminal or CI secret store:
+
+```powershell
+$env:UPLINK_ANDROID_KEYSTORE='C:\secure\uplink-upload.jks'
+$env:UPLINK_ANDROID_KEYSTORE_PASSWORD='<secret>'
+$env:UPLINK_ANDROID_KEY_ALIAS='uplink-upload'
+$env:UPLINK_ANDROID_KEY_PASSWORD='<secret>'
+scripts\build-android.cmd -ApiOrigin https://api.your-domain.com -Configuration Release -VersionCode 1 -VersionName 1.0.0 -RequireSigning
+```
+
+The command refuses local, `.test`, `.invalid`, and `example.*` domains for release builds, fails
+when required signing values are incomplete, and verifies the package identity,
+version, microphone permission (APK), API origin, and one-time WebSocket ticket flow.
+Outputs are written to `dist/android/` and are intentionally ignored by Git.
+
+The `Android build` GitHub Actions workflow runs the same regression and package
+checks. Manual release runs can use repository secrets named
+`UPLINK_ANDROID_KEYSTORE_BASE64`, `UPLINK_ANDROID_KEYSTORE_PASSWORD`,
+`UPLINK_ANDROID_KEY_ALIAS`, and `UPLINK_ANDROID_KEY_PASSWORD`.
+
 - Android: open `android/` in Android Studio, install the required SDK, then
   create a signed AAB for Google Play.
 - iOS: open `ios/App/App.xcodeproj` on macOS with Xcode, select the Apple
@@ -70,3 +107,7 @@ npm run mobile:sync
 
 The checked-in native projects contain no signing certificates, provisioning
 profiles, Android keystores, passwords, customer data, or provider credentials.
+
+The macOS operator should follow `docs/macos-ios-handoff.md`; Windows has already
+generated the branded icons and splash assets, so Xcode work is limited to final
+sync, signing, device verification, archive validation, and App Store upload.

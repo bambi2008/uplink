@@ -1,0 +1,116 @@
+name: Android build
+
+on:
+  push:
+    branches: [codex/commercial-mobile]
+    paths:
+      - "android/**"
+      - "mobile/**"
+      - "scripts/**"
+      - "static/**"
+      - "tests/**"
+      - "package*.json"
+      - "capacitor.config.json"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "mobile/**"
+      - "scripts/**"
+      - "static/**"
+      - "tests/**"
+      - "package*.json"
+      - "capacitor.config.json"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+    inputs:
+      api_origin:
+        description: Production HTTPS API origin
+        required: true
+        type: string
+      version_code:
+        description: Monotonically increasing Android version code
+        required: true
+        default: "1"
+        type: string
+      version_name:
+        description: Customer-visible version
+        required: true
+        default: "1.0.0"
+        type: string
+      require_signing:
+        description: Require the Android signing secrets
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      UPLINK_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.UPLINK_ANDROID_KEYSTORE_PASSWORD }}
+      UPLINK_ANDROID_KEY_ALIAS: ${{ secrets.UPLINK_ANDROID_KEY_ALIAS }}
+      UPLINK_ANDROID_KEY_PASSWORD: ${{ secrets.UPLINK_ANDROID_KEY_PASSWORD }}
+      UPLINK_ANDROID_KEYSTORE_BASE64: ${{ secrets.UPLINK_ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          package-manager-cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          python -m pip install -r requirements.txt
+
+      - name: Run regression tests
+        shell: pwsh
+        run: |
+          npm run mobile:test
+          python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Restore optional Android signing key
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.require_signing }}
+        shell: pwsh
+        run: |
+          if (-not $env:UPLINK_ANDROID_KEYSTORE_BASE64) { throw 'UPLINK_ANDROID_KEYSTORE_BASE64 is missing' }
+          $path = Join-Path $env:RUNNER_TEMP 'uplink-upload.jks'
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:UPLINK_ANDROID_KEYSTORE_BASE64))
+          "UPLINK_ANDROID_KEYSTORE=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build and verify Android package
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $arguments = @('-ApiOrigin', '${{ inputs.api_origin }}', '-Configuration', 'Release', '-VersionCode', '${{ inputs.version_code }}', '-VersionName', '${{ inputs.version_name }}')
+            if ('${{ inputs.require_signing }}' -eq 'true') { $arguments += '-RequireSigning' }
+          } else {
+            $arguments = @('-ApiOrigin', 'https://ci.invalid', '-Configuration', 'Debug', '-VersionCode', '1', '-VersionName', '1.0.0')
+          }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 @arguments
+          if ($LASTEXITCODE -ne 0) { throw "Android build failed with exit code $LASTEXITCODE" }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uplink-android-${{ github.run_number }}
+          path: dist/android/*
+          if-no-files-found: error
+          retention-days: 14

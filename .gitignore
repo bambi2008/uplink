@@ -18,3 +18,7 @@ debug.log
 commercial-data/
 node_modules/
 www/
+dist/
+*.jks
+*.keystore
+.env.android*
