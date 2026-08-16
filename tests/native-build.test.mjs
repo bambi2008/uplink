@@ -6,6 +6,8 @@ const build = await readFile(new URL('../scripts/build-mobile.mjs', import.meta.
 const androidBuild = await readFile(new URL('../android/app/build.gradle', import.meta.url), 'utf8')
 const windowsBuild = await readFile(new URL('../scripts/build-android.ps1', import.meta.url), 'utf8')
 const assetBuild = await readFile(new URL('../scripts/generate-native-assets.ps1', import.meta.url), 'utf8')
+const iosPackage = await readFile(new URL('../ios/App/CapApp-SPM/Package.swift', import.meta.url), 'utf8')
+const iosIcon = await readFile(new URL('../ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png', import.meta.url))
 const config = JSON.parse(await readFile(new URL('../capacitor.config.json', import.meta.url), 'utf8'))
 
 assert.match(build, /UPLINK_API_ORIGIN/)
@@ -26,5 +28,9 @@ assert.match(windowsBuild, /verify-android-package\.ps1/)
 assert.doesNotMatch(windowsBuild, /MINIMAX_API_KEY|XF_APIKEY|DOUBAO_ACCESS_TOKEN/)
 assert.match(assetBuild, /AppIcon-512@2x\.png/)
 assert.match(assetBuild, /DarkBackground/)
+assert.match(iosPackage, /path: "\.\.\/\.\.\/\.\.\/node_modules\/@aparajita\/capacitor-secure-storage"/)
+assert.equal(iosIcon.readUInt32BE(16), 1024)
+assert.equal(iosIcon.readUInt32BE(20), 1024)
+assert.equal(iosIcon[25], 2, 'App Store icon must be an RGB PNG without alpha')
 
 console.log('native mobile build contract tests passed')

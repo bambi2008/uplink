@@ -37,7 +37,10 @@ DAILY_REQUEST_LIMIT = max(20, int(os.environ.get("UPLINK_DAILY_REQUEST_LIMIT", "
 DATA_DIR = pathlib.Path(os.environ.get("UPLINK_DATA_DIR", pathlib.Path(__file__).parent / "commercial-data"))
 DB_PATH = DATA_DIR / "uplink.sqlite3"
 COOKIE_NAME = "uplink_session"
-USER_KEY = web.RequestKey("uplink_commercial_user", dict)
+if hasattr(web, "RequestKey"):
+    USER_KEY = web.RequestKey("uplink_commercial_user", dict)
+else:
+    USER_KEY = "uplink_commercial_user"
 STORE_KEY = web.AppKey("uplink_commercial_store", object)
 PUBLIC_ORIGIN = os.environ.get("UPLINK_PUBLIC_ORIGIN", "").rstrip("/")
 TRUST_PROXY = env_flag("UPLINK_TRUST_PROXY", False)
