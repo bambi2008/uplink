@@ -19,6 +19,7 @@ commercial-data/
 node_modules/
 www/
 dist/
+build/
 *.jks
 *.keystore
 .env.android*
