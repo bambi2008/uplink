@@ -10,6 +10,10 @@ provider credentials.
 - Terminate TLS at the hosting load balancer and set `UPLINK_PUBLIC_ORIGIN` to the
   exact public HTTPS origin.
 - Store every provider credential in the hosting platform's secret manager.
+- To use DeepSeek for chat and reports, set `UPLINK_CHAT_PROVIDER=deepseek`,
+  `DEEPSEEK_API_KEY`, and optionally `UPLINK_CHAT_MODELS=deepseek-v4-flash`.
+  MiniMax credentials remain separate and are still required when MiniMax is
+  used for speech synthesis.
 - Mount a persistent encrypted volume at `/data`.
 - Run one application replica while the pilot uses SQLite. A PostgreSQL storage
   adapter is required before horizontal scaling.

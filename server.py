@@ -17,7 +17,7 @@ Jake 稳定版 · 本地后端
 
 启动：
   pip install -r requirements.txt
-  设置环境变量 MINIMAX_API_KEY（和可选 MINIMAX_GROUP_ID），或运行时在网页里填
+  设置聊天与语音服务所需的环境变量，或运行时在网页里填写 MiniMax 配置
   python server.py   →  打开 http://127.0.0.1:8800/
 """
 
@@ -58,11 +58,22 @@ LOCAL_SETTINGS = ROOT / "local-settings.json"
 SERVER_HOST = os.environ.get("UPLINK_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("UPLINK_PORT", "8800"))
 
-MINIMAX_BASE = "https://api.minimaxi.com"      # MiniMax 负责"想+说"
+MINIMAX_BASE = "https://api.minimaxi.com"      # MiniMax 负责语音合成
+DEEPSEEK_BASE = os.environ.get("UPLINK_DEEPSEEK_BASE", "https://api.deepseek.com").rstrip("/")
+CHAT_PROVIDER = os.environ.get("UPLINK_CHAT_PROVIDER", "minimax").strip().lower()
+if CHAT_PROVIDER not in {"minimax", "deepseek"}:
+    CHAT_PROVIDER = "minimax"
 XF_RTASR_HOST = "rtasr.xfyun.cn"               # 讯飞负责"听"（实时语音转写）
 
-CHAT_MODEL = "MiniMax-Text-01"                 # 非思考型：不打腹稿，接话快
-CHAT_MODEL_FALLBACK = "MiniMax-M2.5-highspeed" # 若上者不可用自动回退
+CHAT_MODEL_DEFAULTS = (
+    "deepseek-v4-flash" if CHAT_PROVIDER == "deepseek"
+    else "MiniMax-Text-01,MiniMax-M2.5-highspeed"
+)
+CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
+    "UPLINK_CHAT_MODELS", CHAT_MODEL_DEFAULTS
+).split(",") if model.strip())
+CHAT_MODEL = CHAT_MODELS[0]
+CHAT_MODEL_FALLBACK = CHAT_MODELS[1] if len(CHAT_MODELS) > 1 else CHAT_MODELS[0]
 TTS_MODEL = "speech-2.8-turbo"
 MINIMAX_TTS_WS = os.environ.get("UPLINK_MINIMAX_TTS_WS", "wss://api.minimaxi.com/ws/v1/t2a_v2")
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=50)
@@ -84,9 +95,6 @@ MOBILE_MODE = env_flag("UPLINK_MOBILE_MODE", False)
 COMMERCIAL_MODE = commercial.ENABLED
 MOBILE_ACCESS_TOKEN = os.environ.get("UPLINK_MOBILE_ACCESS_TOKEN", "").strip()
 MOBILE_COOKIE = "uplink_mobile"
-CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
-    "UPLINK_CHAT_MODELS", "MiniMax-Text-01,MiniMax-M2.5-highspeed"
-).split(",") if model.strip())
 MODEL_NEGATIVE_TTL = 600.0
 MODEL_NEGATIVE_CACHE = {}
 HTTP_CLIENT_KEY = web.AppKey("uplink_http_client", aiohttp.ClientSession)
@@ -280,6 +288,7 @@ async def _receive_upstream_json(ws, timeout=12):
 ENV_KEY = os.environ.get("MINIMAX_API_KEY", "")
 ENV_TTS_KEY = os.environ.get("MINIMAX_TTS_API_KEY", "")
 ENV_GROUP = os.environ.get("MINIMAX_GROUP_ID", "")
+ENV_DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 # 讯飞（识别）：需要 APPID 和 APIKey
 ENV_XF_APPID = os.environ.get("XF_APPID", "")
 ENV_XF_APIKEY = os.environ.get("XF_APIKEY", "")
@@ -297,6 +306,7 @@ def _provider_settings():
         "mm_key": ENV_KEY,
         "mm_tts_key": ENV_TTS_KEY or ENV_KEY,
         "mm_group": ENV_GROUP,
+        "ds_key": ENV_DEEPSEEK_KEY,
         "xf_appid": ENV_XF_APPID,
         "xf_apikey": ENV_XF_APIKEY,
         "xf_ise_key": ENV_XF_ISE_KEY,
@@ -316,6 +326,38 @@ def key_from(req):
             return supplied
     supplied = (req.headers.get("X-MM-Key") or "").strip()
     return supplied or _read_local_settings().get("mm_key", "") or ENV_KEY
+
+
+def chat_key_from(req):
+    if CHAT_PROVIDER != "deepseek":
+        return key_from(req)
+    if COMMERCIAL_MODE:
+        return ENV_DEEPSEEK_KEY
+    auth = req.headers.get("Authorization", "")
+    if isinstance(auth, str) and auth.lower().startswith("bearer "):
+        supplied = auth[7:].strip()
+        if supplied:
+            return supplied
+    supplied = (req.headers.get("X-DeepSeek-Key") or "").strip()
+    return supplied or _read_local_settings().get("ds_key", "") or ENV_DEEPSEEK_KEY
+
+
+def _chat_endpoint():
+    if CHAT_PROVIDER == "deepseek":
+        return DEEPSEEK_BASE + "/chat/completions"
+    return MINIMAX_BASE + "/v1/chat/completions"
+
+
+def _chat_payload(model, messages, temperature, stream):
+    payload = {"model": model, "temperature": temperature,
+               "stream": stream, "messages": messages}
+    if CHAT_PROVIDER == "deepseek":
+        payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
+def _chat_provider_label():
+    return "DeepSeek" if CHAT_PROVIDER == "deepseek" else "MiniMax"
 
 
 def group_from(req):
@@ -454,11 +496,11 @@ async def prepare_response(req, response):
 
 
 SAFE_SETTING_KEYS = {
-    "mm_key", "mm_tts_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
+    "mm_key", "mm_tts_key", "mm_group", "ds_key", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token", "user_name", "asr_engine", "mm_pace", "mm_tq", "mm_voice",
 }
 TOKEN_SETTING_KEYS = {
-    "mm_key", "mm_tts_key", "mm_group", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
+    "mm_key", "mm_tts_key", "mm_group", "ds_key", "xf_appid", "xf_apikey", "xf_ise_key", "xf_ise_secret",
     "db_appid", "db_token",
 }
 PREFERENCE_SETTING_KEYS = SAFE_SETTING_KEYS - TOKEN_SETTING_KEYS
@@ -581,15 +623,15 @@ async def _api_chat_legacy(req):
     messages = body.get("messages", [])
     if not isinstance(messages, list) or not messages:
         return web.json_response({"error": "缺少对话内容"}, status=400)
-    key = key_from(req)
+    key = chat_key_from(req)
     if not key:
-        return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
+        return web.json_response({"error": f"缺少 {_chat_provider_label()} API Key"}, status=400)
 
     resp = web.StreamResponse()
     resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     await resp.prepare(req)
 
-    payload = {"model": CHAT_MODEL, "temperature": 0.8, "stream": True, "messages": messages}
+    payload = _chat_payload(CHAT_MODEL, messages, 0.8, True)
     # 流式状态机：过滤掉可能跨数据块的 <think>...</think> 思考段
     in_think = False
     carry = ""  # 暂存可能是"半个标签"的尾部，避免标签被切断漏判
@@ -625,7 +667,7 @@ async def _api_chat_legacy(req):
             wrote_any = False
             for model_try in (CHAT_MODEL, CHAT_MODEL_FALLBACK):
                 payload["model"] = model_try
-                async with s.post(MINIMAX_BASE + "/v1/chat/completions",
+                async with s.post(_chat_endpoint(),
                                   headers={"Authorization": "Bearer " + key,
                                            "Content-Type": "application/json"},
                                   json=payload) as r:
@@ -670,9 +712,9 @@ async def api_chat(req):
     messages = body.get("messages", [])
     if not isinstance(messages, list) or not messages:
         return web.json_response({"error": "缺少对话内容"}, status=400)
-    key = key_from(req)
+    key = chat_key_from(req)
     if not key:
-        return web.json_response({"error": "缺少 MiniMax API Key"}, status=400)
+        return web.json_response({"error": f"缺少 {_chat_provider_label()} API Key"}, status=400)
 
     turn_id = _safe_id(body.get("turn_id"))
     started = time.perf_counter()
@@ -684,11 +726,10 @@ async def api_chat(req):
         attempt_started = time.perf_counter()
         try:
             candidate = await session.post(
-                MINIMAX_BASE + "/v1/chat/completions",
+                _chat_endpoint(),
                 headers={"Authorization": "Bearer " + key,
                          "Content-Type": "application/json"},
-                json={"model": model_try, "temperature": 0.8,
-                      "stream": True, "messages": messages},
+                json=_chat_payload(model_try, messages, 0.8, True),
             )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             failures.append((model_try, 0, type(exc).__name__))
@@ -716,7 +757,7 @@ async def api_chat(req):
                               "duration_ms": round((time.perf_counter() - attempt_started) * 1000, 1)})
         if status in {401, 403}:
             return web.json_response({
-                "error": "MiniMax 对话接口拒绝了当前 API Key，请检查对话 Key 的权限。"
+                "error": f"{_chat_provider_label()} 对话接口拒绝了当前 API Key，请检查对话 Key 的权限。"
             }, status=502)
 
     if upstream is None:
@@ -725,12 +766,13 @@ async def api_chat(req):
                               "duration_ms": round((time.perf_counter() - started) * 1000, 1),
                               "attempt_count": len(failures)})
         return web.json_response({
-            "error": "MiniMax 对话模型暂时不可用" + (f"（{status_list}）" if status_list else "")
+            "error": f"{_chat_provider_label()} 对话模型暂时不可用" + (f"（{status_list}）" if status_list else "")
         }, status=502)
 
     response = web.StreamResponse(headers={
         "Content-Type": "text/plain; charset=utf-8",
         "X-Uplink-Chat-Model": selected_model,
+        "X-Uplink-Chat-Provider": CHAT_PROVIDER,
     })
     await response.prepare(req)
     in_think = False
@@ -815,12 +857,11 @@ async def mm_chat_once(key, messages, temperature=0.7, session=None):
     s = session or aiohttp.ClientSession(timeout=HTTP_TIMEOUT, trust_env=True)
     try:
         for model_try in _chat_model_candidates():
-            payload = {"model": model_try, "temperature": temperature, "messages": messages}
             try:
-                async with s.post(MINIMAX_BASE + "/v1/chat/completions",
+                async with s.post(_chat_endpoint(),
                                   headers={"Authorization": "Bearer " + key,
                                            "Content-Type": "application/json"},
-                                  json=payload) as r:
+                                  json=_chat_payload(model_try, messages, temperature, False)) as r:
                     detail = await r.text()
                     if r.status in {401, 403}:
                         return ""
@@ -1339,7 +1380,7 @@ async def fetch_titles():
 
 
 async def api_briefing(req):
-    key = key_from(req)
+    key = chat_key_from(req)
     if not key:
         return web.json_response({"error": "缺少 API Key"}, status=400)
     import datetime
@@ -1350,7 +1391,7 @@ async def api_briefing(req):
     if f.exists():
         return web.json_response({"cards": f.read_text(encoding="utf-8")})
 
-    # 抓热点：整步硬超时 8 秒，抓不到就让 MiniMax 现编
+    # 抓热点：整步硬超时 8 秒，抓不到就让对话模型现编
     titles = []
     try:
         titles = await asyncio.wait_for(fetch_titles(), timeout=8)
@@ -1415,7 +1456,7 @@ REPORT_SYSTEM = ("你是一位资深英语教练。下面是学员和美国朋�
 
 async def api_report(req):
     body = await req.json()
-    key = key_from(req)
+    key = chat_key_from(req)
     convo = body.get("transcript", "")[-20000:]
     if not key or not convo:
         return web.json_response({"report": "（本次没有可用记录）"})
@@ -1597,6 +1638,7 @@ async def api_diag(req):
                                          "remote": _is_remote_request(req),
                                          "managed_credentials": MOBILE_MODE and _is_remote_request(req),
                                          "secure_context": _request_is_https(req)},
+                              "chat_provider": CHAT_PROVIDER,
                               "chat_models": list(CHAT_MODELS)})
 
 

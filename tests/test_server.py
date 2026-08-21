@@ -60,6 +60,25 @@ class MiniMaxCredentialTests(unittest.TestCase):
             self.assertEqual(server.key_from(request), "current-key")
 
 
+class ChatProviderTests(unittest.TestCase):
+    def test_deepseek_commercial_key_ignores_customer_authorization(self):
+        request = FakeRequest({}, {"Authorization": "Bearer customer-key"})
+        with patch.object(server, "COMMERCIAL_MODE", True), \
+             patch.object(server, "CHAT_PROVIDER", "deepseek"), \
+             patch.object(server, "ENV_DEEPSEEK_KEY", "server-deepseek"):
+            self.assertEqual(server.chat_key_from(request), "server-deepseek")
+
+    def test_deepseek_uses_official_endpoint_and_non_thinking_mode(self):
+        with patch.object(server, "CHAT_PROVIDER", "deepseek"), \
+             patch.object(server, "DEEPSEEK_BASE", "https://api.deepseek.com"):
+            self.assertEqual(server._chat_endpoint(), "https://api.deepseek.com/chat/completions")
+            payload = server._chat_payload(
+                "deepseek-v4-flash", [{"role": "user", "content": "Hello"}], 0.8, True
+            )
+            self.assertEqual(payload["thinking"], {"type": "disabled"})
+            self.assertTrue(payload["stream"])
+
+
 class MobileSettingsIsolationTests(unittest.TestCase):
     def test_managed_client_never_receives_credential_values(self):
         payload = server._settings_for_client({
@@ -80,6 +99,7 @@ class MobileSettingsIsolationTests(unittest.TestCase):
     def test_mobile_preference_save_preserves_all_credentials(self):
         current = {
             "mm_key": "chat-secret",
+            "ds_key": "deepseek-secret",
             "mm_tts_key": "voice-secret",
             "xf_apikey": "speech-secret",
             "db_token": "doubao-secret",
@@ -88,6 +108,7 @@ class MobileSettingsIsolationTests(unittest.TestCase):
         }
         incoming = {
             "mm_key": "replacement-must-be-ignored",
+            "ds_key": "replacement-must-be-ignored",
             "xf_apikey": "replacement-must-be-ignored",
             "db_token": "replacement-must-be-ignored",
             "user_name": "Jose",
@@ -97,6 +118,7 @@ class MobileSettingsIsolationTests(unittest.TestCase):
         merged = server._merge_settings(current, incoming, allow_credentials=False)
 
         self.assertEqual(merged["mm_key"], "chat-secret")
+        self.assertEqual(merged["ds_key"], "deepseek-secret")
         self.assertEqual(merged["mm_tts_key"], "voice-secret")
         self.assertEqual(merged["xf_apikey"], "speech-secret")
         self.assertEqual(merged["db_token"], "doubao-secret")

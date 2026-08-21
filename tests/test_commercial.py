@@ -72,8 +72,10 @@ class CommercialCredentialIsolationTests(unittest.TestCase):
     def test_commercial_provider_settings_never_read_local_backup(self):
         with patch.object(server, "COMMERCIAL_MODE", True), \
              patch.object(server, "ENV_KEY", "server-chat"), \
+             patch.object(server, "ENV_DEEPSEEK_KEY", "server-deepseek"), \
              patch.object(server, "_read_local_settings", side_effect=AssertionError("must not read local settings")):
             self.assertEqual(server._provider_settings()["mm_key"], "server-chat")
+            self.assertEqual(server._provider_settings()["ds_key"], "server-deepseek")
 
     def test_websocket_tickets_are_path_bound_and_single_use(self):
         commercial.WS_TICKETS.clear()
