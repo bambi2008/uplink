@@ -8,6 +8,7 @@ const windowsBuild = await readFile(new URL('../scripts/build-android.ps1', impo
 const assetBuild = await readFile(new URL('../scripts/generate-native-assets.ps1', import.meta.url), 'utf8')
 const iosPackage = await readFile(new URL('../ios/App/CapApp-SPM/Package.swift', import.meta.url), 'utf8')
 const iosIcon = await readFile(new URL('../ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png', import.meta.url))
+const mobileUi = await readFile(new URL('../static/index.html', import.meta.url), 'utf8')
 const config = JSON.parse(await readFile(new URL('../capacitor.config.json', import.meta.url), 'utf8'))
 
 assert.match(build, /UPLINK_API_ORIGIN/)
@@ -32,5 +33,7 @@ assert.match(iosPackage, /path: "\.\.\/\.\.\/\.\.\/node_modules\/@aparajita\/cap
 assert.equal(iosIcon.readUInt32BE(16), 1024)
 assert.equal(iosIcon.readUInt32BE(20), 1024)
 assert.equal(iosIcon[25], 2, 'App Store icon must be an RGB PNG without alpha')
+assert.match(mobileUi, /\.hud-line\{left:50%;bottom:52%/)
+assert.match(mobileUi, /\.hud-line\{bottom:54%;font-size:18px\}/)
 
 console.log('native mobile build contract tests passed')
