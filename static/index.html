@@ -416,7 +416,10 @@ function jakeVoice(){return sGet('mm_voice')||VOICES[0][0]}
 const SETTING_KEYS=['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token','user_name','asr_engine','mm_pace','mm_tq','mm_voice'];
 const TOKEN_SETTING_KEYS=new Set(['mm_key','mm_tts_key','mm_group','xf_appid','xf_apikey','xf_ise_key','xf_ise_secret','db_appid','db_token']);
 let settingsReady=null, settingsLoaded=false, commercialRuntime=false, currentAccount=null,
-  serverManagedCredentials=typeof location!=='undefined'&&location.protocol==='https:'&&!['localhost','127.0.0.1'].includes(location.hostname),
+  serverManagedCredentials=typeof location!=='undefined'&&(
+    ['capacitor:','ionic:'].includes(location.protocol)||
+    (location.protocol==='https:'&&!['localhost','127.0.0.1'].includes(location.hostname))
+  ),
   serverCredentialStatus={};
 function settingUsable(k,v){
   const value=cleanToken(v);
@@ -437,11 +440,17 @@ function collectSettings(){
 function credentialAvailable(key){
   return serverManagedCredentials?!!serverCredentialStatus[key]:!!sGet(key);
 }
+function communicationsReady(){
+  if(!serverManagedCredentials)return credentialAvailable('mm_key');
+  const chatReady=credentialAvailable('ds_key')||credentialAvailable('mm_key');
+  const speechReady=credentialAvailable('mm_tts_key')||credentialAvailable('mm_key');
+  return chatReady&&speechReady;
+}
 function applyCredentialMode(){
   if(typeof document==='undefined')return;
   document.documentElement.classList.toggle('mobile-managed',serverManagedCredentials);
   if(serverManagedCredentials){
-    const ready=credentialAvailable('mm_key');
+    const ready=communicationsReady();
     $('mobileCredentials').textContent=commercialRuntime
       ?(ready?'通讯服务由 Uplink 平台统一管理。':'通讯服务正在维护，请稍后再试。')
       :(ready
@@ -566,7 +575,7 @@ function setHalo(s){
 }
 function validateKeysForCall(){
   if(serverManagedCredentials){
-    if(!credentialAvailable('mm_key'))throw new Error('电脑端尚未配置 MiniMax API Key，请先回电脑端完成通讯设置。');
+    if(!communicationsReady())throw new Error('Uplink 平台通讯服务尚未配置完整，请稍后再试。');
     return;
   }
   const mm=cleanToken(sGet('mm_key')), group=cleanToken(sGet('mm_group'));
@@ -1903,8 +1912,16 @@ async function startCall(){
     const settingsOk=await ensureLocalSettings();
     if(!settingsOk&&serverManagedCredentials){starting=false;setStatus('⚠️ 手机暂时连不上电脑端设置，请确认手机启动窗口仍在运行后重试。');return;}
   }catch(e){ starting=false; setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
-  if(!credentialAvailable('mm_key')){ starting=false; applyCredentialMode(); $('keyOverlay').style.display='flex'; return; }
-  try{ validateKeysForCall(); }catch(e){ starting=false; setStatus('⚠️ '+e.message); $('keyOverlay').style.display='flex'; return; }
+  if(!communicationsReady()){
+    starting=false; applyCredentialMode();
+    if(serverManagedCredentials){setStatus('⚠️ Uplink 平台通讯服务正在维护，请稍后再试。');return;}
+    $('keyOverlay').style.display='flex'; return;
+  }
+  try{ validateKeysForCall(); }catch(e){
+    starting=false; setStatus('⚠️ '+e.message);
+    if(!serverManagedCredentials)$('keyOverlay').style.display='flex';
+    return;
+  }
   resetCallRuntime();
   $('prepCard').style.display='none'; $('btnStart').disabled=true;
   $('btnStart').textContent='◉ 通讯建立中…';   // 按下瞬间立刻给反馈

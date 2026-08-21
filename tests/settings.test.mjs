@@ -7,7 +7,7 @@ import vm from 'node:vm';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const html=readFileSync(path.join(root,'static','index.html'),'utf8');
 const start=html.indexOf('function cleanToken');
-const end=html.indexOf('function collectSettings',start);
+const end=html.indexOf('function applyCredentialMode',start);
 assert.ok(start>=0&&end>start,'settings helpers not found');
 
 const context=vm.createContext({
@@ -21,6 +21,20 @@ assert.equal(context.settingUsable('xf_apikey','a'.repeat(32)),true);
 assert.equal(context.settingUsable('xf_apikey','a'.repeat(16)+' 通讯建立失败'),false);
 assert.equal(context.credentialCollision('1234567890','1234567890'),true);
 assert.equal(context.credentialCollision('minimax-key','doubao-token'),false);
+vm.runInContext("serverManagedCredentials=true;serverCredentialStatus={ds_key:true,mm_tts_key:true}",context);
+assert.equal(vm.runInContext('communicationsReady()',context),true);
+vm.runInContext("serverCredentialStatus={ds_key:true,mm_tts_key:false,mm_key:false}",context);
+assert.equal(vm.runInContext('communicationsReady()',context),false);
+vm.runInContext("serverCredentialStatus={ds_key:false,mm_tts_key:false,mm_key:true}",context);
+assert.equal(vm.runInContext('communicationsReady()',context),true);
+
+const nativeContext=vm.createContext({
+  location:{protocol:'capacitor:',hostname:'localhost'},
+  VOICES:[['voice','Voice']],
+  sGet:()=>'',
+});
+vm.runInContext(html.slice(start,end),nativeContext);
+assert.equal(vm.runInContext('serverManagedCredentials',nativeContext),true);
 
 const voiceSection=html.slice(html.indexOf('function renderVoices'),html.indexOf("$('keySave').onclick"));
 assert.doesNotMatch(voiceSection,/saveLocalSettings\(\)/);
