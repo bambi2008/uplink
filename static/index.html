@@ -494,6 +494,9 @@ function ensureLocalSettings(){
 }
 function localServerHint(){
   const here=location.origin&&location.origin!=='null'?location.origin:'file://';
+  if(commercialRuntime){
+    return '当前 App 地址：'+here+'。Uplink 云端通讯暂时不可用，请稍后重试。';
+  }
   if(serverManagedCredentials||location.protocol==='https:'){
     return '当前手机地址：'+here+'。请确认电脑端的「启动手机端」窗口仍在运行；地址失效时重新扫描电脑上的连接码。';
   }
@@ -1020,7 +1023,7 @@ async function chatStream(messages, onSentence, turnId){
   const options={method:'POST',headers:hdrs(),body:JSON.stringify({messages,turn_id:turnId||''})};
   if(callAbort) options.signal=callAbort.signal;
   if(turnId)markTurn('chat_request');
-  const r=await fetchLocal('/api/chat',options, 'MiniMax 对话接口');
+  const r=await fetchLocal('/api/chat',options, 'AI 对话接口');
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{};throw new Error('对话失败 '+r.status+(m?'：'+m:''));}
   const reader=r.body.getReader(), dec=new TextDecoder();
   let full='',pending='',emoDone=false,emoBuf='',firstOut=false,firstRaw=false;
@@ -1910,7 +1913,7 @@ async function startCall(){
   starting=true;
   try{
     const settingsOk=await ensureLocalSettings();
-    if(!settingsOk&&serverManagedCredentials){starting=false;setStatus('⚠️ 手机暂时连不上电脑端设置，请确认手机启动窗口仍在运行后重试。');return;}
+    if(!settingsOk&&serverManagedCredentials){starting=false;setStatus(commercialRuntime?'⚠️ Uplink 云端通讯暂时不可用，请稍后重试。':'⚠️ 手机暂时连不上电脑端设置，请确认手机启动窗口仍在运行后重试。');return;}
   }catch(e){ starting=false; setStatus('⚠️ 本地设置读取失败：'+e.message); return; }
   if(!communicationsReady()){
     starting=false; applyCredentialMode();
@@ -1963,7 +1966,7 @@ async function startCall(){
     history.push({role:'user',content:'(The call just connected. Open with ONE short warm Chinese greeting like "哎，接通啦！最近咋样啊？" then glide into English small talk. Emotion tag first.)'});
     genDone=false; curEmotion=''; replySeg=0; gapFills=0; streamingReply=beginStreamingReply('');
     const openingVersion=interruptVersion;
-    const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（MiniMax对话接口）');
+    const opening=await withTimeout(chatStream(history, s=>enqueueSpeech(s)),40000,'唤醒Jake（AI对话接口）');
     if(openingVersion!==interruptVersion){starting=false;return;}
     genDone=true;
     if(opening){history.push({role:'assistant',content:cleanForHistory(opening)}); addLine('assistant',cleanForDisplay(opening));}

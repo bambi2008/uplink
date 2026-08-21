@@ -1,3 +1,4 @@
+import hashlib
 import pathlib
 import tempfile
 import unittest
@@ -17,8 +18,14 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
         await self.store.initialize()
         self.enabled = patch.object(commercial, "ENABLED", True)
         self.insecure = patch.object(commercial, "INSECURE_COOKIE", True)
+        self.password_hash = patch.object(
+            commercial,
+            "_password_hash",
+            lambda password, salt=None: "scrypt$00$" + hashlib.sha256(password.encode("utf-8")).hexdigest(),
+        )
         self.enabled.start()
         self.insecure.start()
+        self.password_hash.start()
         commercial.AUTH_ATTEMPTS.clear()
         self.server_mode = patch.object(server, "COMMERCIAL_MODE", True)
         self.server_mode.start()
@@ -34,6 +41,16 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
 
         app.router.add_get("/api/private", private)
         app.router.add_get("/ws/asr", private)
+
+        async def streamed(req):
+            response = web.StreamResponse(headers={"Content-Type": "text/plain"})
+            await response.prepare(req)
+            await response.write(b"ok")
+            await response.write_eof()
+            return response
+
+        app.router.add_get("/api/stream", streamed)
+        app.on_response_prepare.append(server.prepare_response)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
 
@@ -41,6 +58,7 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.insecure.stop()
         self.enabled.stop()
+        self.password_hash.stop()
         self.server_mode.stop()
         commercial.AUTH_ATTEMPTS.clear()
         self.temp.cleanup()
@@ -130,6 +148,20 @@ class CommercialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(allowed.status, 204)
         self.assertEqual(allowed.headers.get("Access-Control-Allow-Origin"), "capacitor://localhost")
         self.assertNotIn("Access-Control-Allow-Origin", denied.headers)
+
+    async def test_native_cors_header_is_sent_before_stream_starts(self):
+        registered = await self.client.post("/api/account/register", headers={"X-Uplink-Client": "native"}, json={
+            "email": "stream@example.com", "password": "customer-password", "name": "Stream",
+        })
+        token = (await registered.json())["access_token"]
+        streamed = await self.client.get("/api/stream", headers={
+            "Authorization": "Bearer " + token,
+            "X-Uplink-Client": "native",
+            "Origin": "capacitor://localhost",
+        })
+        self.assertEqual(streamed.status, 200)
+        self.assertEqual(await streamed.text(), "ok")
+        self.assertEqual(streamed.headers.get("Access-Control-Allow-Origin"), "capacitor://localhost")
 
     async def test_production_origin_check_accepts_native_and_rejects_other_sites(self):
         registered = await self.client.post("/api/account/register", headers={"X-Uplink-Client": "native"}, json={

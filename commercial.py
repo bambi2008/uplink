@@ -468,6 +468,25 @@ async def auth_middleware(req, handler):
     return await handler(req)
 
 
+def apply_cors_headers(req, response):
+    """Attach native-app CORS headers before a response is prepared.
+
+    The middleware runs too late for StreamResponse/WebSocketResponse objects
+    whose headers are sent inside the handler.  server.prepare_response calls
+    this helper at aiohttp's last safe pre-send hook as well.
+    """
+    if not ENABLED:
+        return response
+    origin = req.headers.get("Origin", "").rstrip("/")
+    if origin in NATIVE_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Uplink-Client"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Max-Age"] = "600"
+    return response
+
+
 @web.middleware
 async def cors_middleware(req, handler):
     if not ENABLED:
@@ -478,13 +497,7 @@ async def cors_middleware(req, handler):
         response = web.Response(status=204)
     else:
         response = await handler(req)
-    if allowed:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Uplink-Client"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Max-Age"] = "600"
-    return response
+    return apply_cors_headers(req, response)
 
 
 async def store_context(app):

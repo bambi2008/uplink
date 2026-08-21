@@ -490,6 +490,8 @@ async def manifest(req):
 
 
 async def prepare_response(req, response):
+    if COMMERCIAL_MODE:
+        commercial.apply_cors_headers(req, response)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "microphone=(self)")
