@@ -1,13 +1,41 @@
 import UIKit
 import Capacitor
+import AVFoundation
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
+    private var audioRouteObserver: NSObjectProtocol?
+
+    private func configureCallAudio() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord,
+                                    mode: .voiceChat,
+                                    options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setActive(true)
+
+            // playAndRecord can fall back to the quiet receiver after WebKit opens the mic.
+            // Keep wired and Bluetooth routes intact, but move the built-in receiver to speaker.
+            if session.currentRoute.outputs.contains(where: { $0.portType == .builtInReceiver }) {
+                try session.overrideOutputAudioPort(.speaker)
+            }
+        } catch {
+            // The web call still works if iOS temporarily owns the audio session.
+            NSLog("Uplink audio session configuration deferred: %@", error.localizedDescription)
+        }
+    }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        configureCallAudio()
+        audioRouteObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            self?.configureCallAudio()
+        }
         return true
     }
 
@@ -26,7 +54,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        configureCallAudio()
     }
 
     func applicationWillTerminate(_ application: UIApplication) {

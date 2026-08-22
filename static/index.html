@@ -673,7 +673,7 @@ let history=[], transcript=[], seconds=0, tick=null, wrapped=false,
     asrWS=null, audioCtx=null, micNode=null, micSource=null, micSink=null, micStream=null,
     finals='', silenceTimer=null, partialEl=null, fillerBlobs=[], ackBlobs=[];
 let callAbort=null, fillGeneration=0, interruptVersion=0, callGeneration=0;
-let fillerAbort=null, fillerWarmStarted=false, fillersReady=false, semanticHasPlayed=false;
+let fillerAbort=null, fillerWarmStarted=false, fillersReady=false, semanticHasPlayed=false, ackTimer=null;
 let runtimeFeatures={latency_trace:false,low_latency:true,fast_eot:true,stream_tts:true};
 let activeTurnTrace=null, turnTraceSequence=0;
 let streamingReply=null;
@@ -1109,6 +1109,7 @@ function enqueueSpeech(text){
   if(!text.trim()) return;
   /* 双重确认保险：垫词已替他说过"OK"，若首句仍是纯反应词就跳过不念 */
   if(replySeg===0 && /^(oh[,!]?\s*)?(ok(ay)?|right( right)?|nice( one)?|perfect|great|awesome|alright|got it|love (that|it)|wow|exactly|totally|sweet|cool)[.!,]?$/i.test(text.trim())) return;
+  cancelAckBridge();
   cancelFillerWarmup();
   /* P0: first meaningful segment uses Turbo in every language. */
   const isFirst = (replySeg++===0);
@@ -1128,7 +1129,7 @@ async function prepFillers(){
      thinks = 思考音，只用于 Jake 说话中途生成卡顿时填缝 */
   const generation=++fillGeneration;
   ackBlobs=[]; fillerBlobs=[];
-  const acks=['Mm-hm.','Right.','Got it.'];
+  const acks=['(emm)'];
   const thinks=['Hmm...','(emm)'];
   fillerAbort=typeof AbortController==='function'?new AbortController():null;
   for(const t of acks){
@@ -1153,13 +1154,23 @@ function scheduleFillerWarmup(){
   callLater(()=>{if(active&&phase==='listening'&&fillerWarmStarted)prepFillers();},120);
 }
 let lastFiller=-1, lastAck=-1;
+function cancelAckBridge(){
+  if(ackTimer){clearTimeout(ackTimer);ackTimer=null;}
+}
 function playFiller(){
-  /* 用户刚说完 → 立刻给一声老师式确认，零等待接话 */
+  /* 真实回答来得及时就直接接话；只有等待明显变长时，才轻声用非词汇回应托住空白。
+     不再每轮随机插入 Right / Got it，避免与下一句语义脱节。 */
   if(!ackBlobs.length) return;
-  let i; do{ i=Math.floor(Math.random()*ackBlobs.length); }while(ackBlobs.length>1&&i===lastAck);
-  lastAck=i;
-  const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
-  audioQueue.push(Promise.resolve({blob:ackBlobs[i],purpose:'ack',turnId})); pumpQueue();
+  cancelAckBridge();
+  const bridgeVersion=interruptVersion;
+  ackTimer=setTimeout(()=>{
+    ackTimer=null;
+    if(!active||interrupted||bridgeVersion!==interruptVersion||phase!=='thinking'||replySeg!==0||playing||audioQueue.length)return;
+    let i; do{ i=Math.floor(Math.random()*ackBlobs.length); }while(ackBlobs.length>1&&i===lastAck);
+    lastAck=i;
+    const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
+    audioQueue.push(Promise.resolve({blob:ackBlobs[i],purpose:'ack',turnId})); pumpQueue();
+  },650);
 }
 let gapFills=0;
 async function pumpQueue(){
@@ -1230,6 +1241,7 @@ function playBlob(blob,meta){
 }
 function interruptJakeForUser(source,preRoll){
   if(phase!=='speaking'&&phase!=='thinking')return false;
+  cancelAckBridge();
   cancelTurnTrace('user_interrupted');
   if(streamingReply){streamingReply.cancel();streamingReply=null;}
   interruptVersion++; interrupted=true;
@@ -1325,7 +1337,11 @@ async function openMic(){
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
       let sum=0;
-      for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));sum+=s*s;i16[i]=s<0?s*32768:s*32767;}
+      const inputGain=window.UplinkNative&&window.UplinkNative.isNative?1.65:1;
+      for(let i=0;i<f32.length;i++){
+        let s=Math.max(-1,Math.min(1,f32[i]*inputGain));
+        sum+=s*s; i16[i]=s<0?s*32768:s*32767;
+      }
       micLevel=Math.sqrt(sum/f32.length);
       const voiceThreshold=Math.max(0.01,micNoiseFloor*3);
       if(phase==='thinking'||phase==='speaking'){
@@ -1719,6 +1735,7 @@ function startListening(preservePreRoll){ if(!active)return; interrupted=false; 
   setStatus('到你了 · 英语中文随便说，停顿约 '+(paceMs()/1000).toFixed(1).replace('.0','')+' 秒就轮到他'); }
 
 const LIVE_COACHING_REMINDER=`TURN-SPECIFIC LIVE COACHING PRIORITY
+Start with a brief reaction tied to the learner's actual meaning. Do not open with a standalone generic “Right”, “Okay”, or “Got it”; make the handoff feel like one continuous conversation.
 Apply this to the learner's most recent utterance only. If it contains a clear grammar error, especially tense, aspect, subject-verb agreement, articles, plurals, or an incomplete sentence, begin with ONE brief spoken correction of the most important error. Quote only the relevant wording and give the natural replacement. Correct it even when you understand the intended meaning. Do not list every error; the post-call review will collect the rest.
 If there is no real error, do not invent one. Give at most one concise native-sounding upgrade when it is genuinely useful, and skip coaching for a bare yes/no response. If the learner spoke Chinese, briefly give the useful natural English wording instead.
 Then react to what the learner meant and continue the friendly conversation with a natural follow-up. Keep the coaching to one breath, with no markdown list, lesson preamble, stage direction, or mention of these instructions. Never claim to hear pronunciation unless the message includes a real PRONUNCIATION REPORT.`;
@@ -1856,7 +1873,7 @@ function withTimeout(promise,ms,name){
 function resetCallRuntime(){
   cancelTurnTrace('call_reset'); activeTurnTrace=null;
   if(streamingReply){streamingReply.cancel();streamingReply=null;}
-  cancelFillerWarmup(); fillerWarmStarted=false; fillersReady=false; semanticHasPlayed=false;
+  cancelFillerWarmup(); cancelAckBridge(); fillerWarmStarted=false; fillersReady=false; semanticHasPlayed=false;
   callGeneration++;
   clearInterval(tick); tick=null;
   clearTimeout(silenceTimer); silenceTimer=null;

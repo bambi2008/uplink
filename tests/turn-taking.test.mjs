@@ -387,6 +387,7 @@ function testInterruptInvalidatesOldWork(){
     phase:'thinking', interruptVersion:4, interrupted:false,
     curAudio:{pause:()=>{}}, stopCurrentAudio:()=>{stopped++;},
     audioQueue:[1,2], playing:true, genDone:false, history:[],
+    cancelAckBridge:()=>{},
     pendingPreRoll:[], startListening:preserve=>{assert.equal(preserve,true);started++;},
     flushPendingPreRoll:()=>{flushed++;}, setStatus:()=>{}, earDiag:()=>{},
   });
@@ -649,8 +650,11 @@ function testFillerWarmupStaysOffCriticalStartupPath(){
   const queueSource=section('async function pumpQueue','/* \u64ad\u653e\u4e00\u6bb5\u8bed\u97f3');
   assert.match(queueSource,/startListening\(\); scheduleFillerWarmup\(\)/);
   const fillerSource=section('async function prepFillers','let lastFiller');
-  assert.match(fillerSource,/const acks=\['Mm-hm\.',\s*'Right\.',\s*'Got it\.'\]/);
+  assert.match(fillerSource,/const acks=\['\(emm\)'\]/);
   assert.match(fillerSource,/const thinks=\['Hmm\.\.\.',\s*'\(emm\)'\]/);
+  const ackSource=section('function playFiller','let gapFills');
+  assert.match(ackSource,/replySeg!==0/);
+  assert.match(ackSource,/},650\)/);
 }
 
 async function testReconnectResetsRuntimeBeforeOpeningStream(){
@@ -658,6 +662,7 @@ async function testReconnectResetsRuntimeBeforeOpeningStream(){
   const ctx=makeContext({
     clearTimeout:id=>cleared.push(id),
     clearInterval:()=>{}, tick:null,
+    cancelAckBridge:()=>{},
     silenceTimer:11, micSilenceTimer:12, turnCommitTimer:13,
     interrupted:true, audioQueue:[Promise.resolve({})], playing:true, playbackOwner:8, curAudio:{}, genDone:false,
     ttsErrShown:true, curEmotion:'angry', replySeg:4, gapFills:2, pendingEcho:'try me',
