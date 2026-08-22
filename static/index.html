@@ -547,9 +547,9 @@ function classifyTurnCompletion(text){
 }
 function computeTurnCommitDelay({paceMode,completionClass,asrIsFinal,msSinceLastAsrUpdate}){
   const table={
-    fast:{strong_complete:280,neutral:420,likely_incomplete:1000},
-    normal:{strong_complete:350,neutral:550,likely_incomplete:1300},
-    calm:{strong_complete:550,neutral:800,likely_incomplete:1700},
+    fast:{strong_complete:140,neutral:220,likely_incomplete:750},
+    normal:{strong_complete:180,neutral:260,likely_incomplete:900},
+    calm:{strong_complete:320,neutral:480,likely_incomplete:1300},
   };
   const pace=table[paceMode]||table.normal;
   let delay=pace[completionClass]||pace.neutral;
@@ -558,9 +558,9 @@ function computeTurnCommitDelay({paceMode,completionClass,asrIsFinal,msSinceLast
   return Math.max(delay,Math.max(0,90-asrAge));
 }
 function computeAsrFlushDelay({hasFinal,hasPartial,heardVoice}){
-  if(hasFinal)return 60;
-  if(hasPartial)return 220;
-  return heardVoice?650:0;
+  if(hasFinal)return 20;
+  if(hasPartial)return 80;
+  return heardVoice?300:0;
 }
 function seaTick(){$('seaTime').textContent=new Date().toLocaleTimeString('en-US',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit'})}
 seaTick();setInterval(seaTick,30000);
@@ -701,8 +701,10 @@ class TurnLatencyTrace{
     const base=this.marks.last_effective_voice||this.marks.turn_started;
     const elapsed={};
     Object.entries(this.marks).forEach(([name,value])=>{elapsed[name]=Math.round((value-base)*10)/10;});
+    const targetMs=1500;
     const event={type:'turn_latency',turn_id:this.id,source_kind:this.source,
-      semantic_first_audio_ms:elapsed.semantic_audio_playing,stages_ms:elapsed,...(extra||{})};
+      semantic_first_audio_ms:elapsed.semantic_audio_playing,target_ms:targetMs,
+      target_met:elapsed.semantic_audio_playing<=targetMs,stages_ms:elapsed,...(extra||{})};
     if(runtimeFeatures.latency_trace){
       console.info('[uplink-latency]',event);
       fetch('/api/latency',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(event)}).catch(()=>{});
@@ -736,9 +738,13 @@ function markTurnOnce(name,extra){
 function cancelTurnTrace(reason){if(activeTurnTrace)activeTurnTrace.cancel(reason);}
 
 class StreamingReplyPlayer{
+  static mediaSourceCtor(){
+    const candidates=[globalThis.MediaSource,globalThis.ManagedMediaSource];
+    return candidates.find(Ctor=>typeof Ctor==='function'&&typeof Ctor.isTypeSupported==='function'
+      &&Ctor.isTypeSupported('audio/mpeg'))||null;
+  }
   static supported(){
-    return typeof MediaSource==='function'&&typeof MediaSource.isTypeSupported==='function'
-      &&MediaSource.isTypeSupported('audio/mpeg')&&typeof WebSocket==='function';
+    return !!this.mediaSourceCtor()&&typeof WebSocket==='function';
   }
   constructor(options){
     this.options=options; this.replyId=options.replyId; this.generation=options.generation;
@@ -746,8 +752,10 @@ class StreamingReplyPlayer{
     this.ready=false; this.begun=false; this.replyStarted=false; this.replyFinished=false; this.ended=false;
     this.firstChunk=false; this.hasPlayed=false; this.failed=false; this.cancelled=false;
     this.fallbackStarted=false; this.playPending=false; this.objectUrl=''; this.firstChunkTimer=null;
-    this.mediaSource=new MediaSource(); this.audio=new Audio();
+    const MediaSourceCtor=StreamingReplyPlayer.mediaSourceCtor();
+    this.mediaSource=new MediaSourceCtor(); this.audio=new Audio();
     this.audio.playsInline=true;
+    this.audio.disableRemotePlayback=true;
     this.objectUrl=URL.createObjectURL(this.mediaSource); this.audio.src=this.objectUrl;
     this.audio.preload='auto'; this.audio.onplaying=()=>this.onPlaying();
     this.audio.onended=()=>this.onEnded(); this.audio.onerror=()=>this.fail('audio playback failed');
@@ -1027,18 +1035,26 @@ async function chatStream(messages, onSentence, turnId){
   if(!r.ok){let m='';try{m=(await r.json()).error}catch{};throw new Error('对话失败 '+r.status+(m?'：'+m:''));}
   const reader=r.body.getReader(), dec=new TextDecoder();
   let full='',pending='',emoDone=false,emoBuf='',firstOut=false,firstRaw=false;
-  const SENT=/[.!?。！？]["')」』]?\s*$/, SOFT=/[,;:.!?，。！？；：…]["')」』]?\s*$/;
+  const SENT=/[.!?。！？]["')」』]?\s*$/;
   function absorb(t){
     if(!emoDone){ emoBuf+=t; const m=emoBuf.match(/^\s*\[(\w+)\]\s*/);
       if(m){const e=m[1].toLowerCase(); if(EMOTIONS.includes(e))curEmotion=(e==='neutral'?'':e); emoDone=true; t=emoBuf.slice(m[0].length); emoBuf='';}
       else if(emoBuf.length>24){emoDone=true;t=emoBuf;emoBuf='';} else return; }
     pending+=t; full+=t;
-    if(!firstOut && pending.trim().length>=10 && SOFT.test(pending)){if(turnId)markTurn('chat_first_speakable');onSentence(pending.trim());pending='';firstOut=true;return;}
-    if(pending.length>=18 && SENT.test(pending)){if(!firstOut&&turnId)markTurn('chat_first_speakable');onSentence(pending.trim());pending='';firstOut=true;}
-    const limit=firstOut?90:48;
+    if(!firstOut){
+      const echoAt=pending.search(/\[\s*echo\s*:/i);
+      const boundarySource=echoAt>=0?pending.slice(0,echoAt):pending;
+      const boundary=boundarySource.match(/^([\s\S]{4,}?[,;:.!?，。！？；：…]["')」』]?\s*)/);
+      if(boundary){
+        if(turnId)markTurn('chat_first_speakable');
+        onSentence(boundary[1].trim()); pending=pending.slice(boundary[1].length); firstOut=true;
+      }
+    }
+    if(firstOut && pending.length>=14 && SENT.test(pending)){onSentence(pending.trim());pending='';}
+    const limit=firstOut?90:24;
     if(pending.length>=limit&&!/\[\s*echo\s*:/i.test(pending)){
       const cut=pending.lastIndexOf(' ',limit);
-      if(cut>=24){
+      if(cut>=(firstOut?24:10)){
         if(!firstOut&&turnId)markTurn('chat_first_speakable');
         onSentence(pending.slice(0,cut).trim()); pending=pending.slice(cut+1); firstOut=true;
       }
@@ -1107,7 +1123,7 @@ function enqueueSpeech(text){
   text=text.replace(/\[\s*echo\s*:\s*([^\]]+)\]/ig,(m,p)=>{pendingEcho=p.trim();return '';});
   text=sanitizeSpeech(text).replace(/\*\*/g,'');   /* 高级用法标记 ** 不进TTS */
   if(!text.trim()) return;
-  /* 双重确认保险：垫词已替他说过"OK"，若首句仍是纯反应词就跳过不念 */
+  /* 避免把纯反应词当成语义首句；首句必须真正回应用户。 */
   if(replySeg===0 && /^(oh[,!]?\s*)?(ok(ay)?|right( right)?|nice( one)?|perfect|great|awesome|alright|got it|love (that|it)|wow|exactly|totally|sweet|cool)[.!,]?$/i.test(text.trim())) return;
   cancelAckBridge();
   cancelFillerWarmup();
@@ -1125,7 +1141,7 @@ function enqueueSpeech(text){
 }
 async function prepFillers(){
   /* 两池分工：
-     acks   = 老师式接话确认，用户一说完 100% 立刻播一个 → 消灭"接话慢"的体感
+     acks   = 仅在等待变长时轻声播放的非词汇回应
      thinks = 思考音，只用于 Jake 说话中途生成卡顿时填缝 */
   const generation=++fillGeneration;
   ackBlobs=[]; fillerBlobs=[];
@@ -1170,7 +1186,7 @@ function playFiller(){
     lastAck=i;
     const turnId=activeTurnTrace&&!activeTurnTrace.finalized?activeTurnTrace.id:'';
     audioQueue.push(Promise.resolve({blob:ackBlobs[i],purpose:'ack',turnId})); pumpQueue();
-  },650);
+  },320);
 }
 let gapFills=0;
 async function pumpQueue(){
@@ -1369,9 +1385,11 @@ async function openMic(){
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
       let sum=0;
-      const inputGain=['capacitor:','ionic:'].includes(location.protocol)?1.65:1;
+      const inputGain=['capacitor:','ionic:'].includes(location.protocol)?2.2:1;
       for(let i=0;i<f32.length;i++){
-        let s=Math.max(-1,Math.min(1,f32[i]*inputGain));
+        /* tanh is a soft limiter: quiet speech gets the full boost while loud
+           peaks approach ±1 smoothly instead of clipping into harsh distortion. */
+        let s=inputGain>1?Math.tanh(f32[i]*inputGain):f32[i];
         sum+=s*s; i16[i]=s<0?s*32768:s*32767;
       }
       micLevel=Math.sqrt(sum/f32.length);
@@ -1501,7 +1519,7 @@ function restartASR(reason){
 
 function armMicSilence(){
   clearTimeout(micSilenceTimer);
-  const delay=runtimeFeatures.fast_eot?Math.max(180,Math.min(320,paceMs()/2)):Math.max(650,paceMs());
+  const delay=runtimeFeatures.fast_eot?Math.max(140,Math.min(200,paceMs()/3)):Math.max(650,paceMs());
   micSilenceTimer=setTimeout(closeAudioTurn,delay);
 }
 
@@ -1668,7 +1686,7 @@ function showPartial(t){
 function armSilence(ms){
   clearTimeout(silenceTimer);
   const requested=ms||paceMs();
-  const delay=runtimeFeatures.fast_eot?Math.max(180,Math.min(320,requested)):Math.max(650,requested);
+  const delay=runtimeFeatures.fast_eot?Math.max(140,Math.min(220,requested)):Math.max(650,requested);
   silenceTimer=setTimeout(()=>{ if(phase==='listening') closeAudioTurn(); },delay);
 }
 function listenAgain(msg){
@@ -1836,7 +1854,7 @@ CRITICAL OUTPUT RULES (your words are converted to speech):
 - You may use these sound tags sparingly (at most one per turn), rendered as real sounds — EXACT spellings only: (laughs) (chuckle) (sighs) (breath) (emm). Any other parenthetical — (chuckles), (smiles), (pauses), etc. — is FORBIDDEN and will be spoken as literal words. If a tag doesn't fit, just write the sound as words: "haha", "whew", "oof".
 - Vary rhythm like a real speaker: short punchy sentences, trailing "..." when musing, dashes for self-interruption, genuine reactions ("No way!", "Oh man...").
 - Keep every turn TIGHT: 2-3 SHORT spoken sentences, ONE idea per turn. Long turns overwhelm the learner — if you have two things to teach, save one for the next turn.
-- The system automatically plays a short acknowledgment ("OK", "Mm-hm") the instant they finish speaking, BEFORE your reply arrives. So NEVER open with a standalone reaction word — no "Oh, perfect!", "Nice!", "OK!" openers; that would double up. Dive straight into substance, and keep your FIRST sentence short (under ~8 words) so it reaches their ears fast.
+- The system may play a quiet nonverbal thinking sound while your reply arrives. Do not open with a generic standalone acknowledgment such as "OK", "Mm-hm", or "Got it". Begin with a meaningful clause tied to what the learner actually said. Make that FIRST clause 2-4 words and end it with punctuation so it can be spoken immediately; never delay that clause to plan the rest of the answer.
 - HANDOVER RULE (hard rule): the echo request is ALWAYS the LAST thing in your turn. "...your turn — try it once: pick-di-dup." Then STOP. Nothing after it — no commentary, no extra question, no follow-up. You are handing them the mic.
 - Everything you output is spoken aloud on the call. NEVER write inner monologue, self-narration, notes-to-self, or stage directions of any kind.
 - You have a wife, a 7-year-old daughter, a golden retriever named Biscuit, and a coffee addiction.
@@ -2004,6 +2022,11 @@ async function startCall(){
     active=true;
     requestCallWakeLock();
     connectASR();
+    /* Warm the cached nonverbal bridge while Jake gives his opening greeting.
+       It is never awaited, so it cannot delay call setup; by the user's first
+       turn it is ready to cover provider/network jitter well inside 1.5 s. */
+    fillerWarmStarted=true;
+    callLater(()=>{if(active&&fillerWarmStarted&&!fillersReady)prepFillers();},0);
     $('btnStart').style.display='none'; $('btnEnd').style.display='inline-block';
     $('timer').style.display='block';
     $('hint').innerHTML='全程不用碰电脑：他说完自动轮到你，你说完停顿片刻轮到他。他说太长？点头像打断。';

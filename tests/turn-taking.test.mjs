@@ -67,7 +67,7 @@ function testPauseCanResume(){
   const commitDelay=[...timers.tasks.values()][0].delay;
   timers.runDelay(commitDelay);
   assert.equal(ctx.turnCommitSent,true);
-  timers.runDelay(60);
+  timers.runDelay(20);
   assert.equal(finished,1);
 }
 
@@ -83,12 +83,12 @@ function testTurnCompletionClassificationAndDelays(){
   for(const value of ['因为我们现在','然后下一步我们会','我主要想说的是']){
     assert.equal(ctx.classifyTurnCompletion(value),'likely_incomplete',value);
   }
-  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'strong_complete',asrIsFinal:true,msSinceLastAsrUpdate:200}),350);
-  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'neutral',asrIsFinal:true,msSinceLastAsrUpdate:200}),550);
-  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'likely_incomplete',asrIsFinal:false,msSinceLastAsrUpdate:200}),1300);
-  assert.equal(ctx.computeAsrFlushDelay({hasFinal:true,hasPartial:true,heardVoice:true}),60);
-  assert.equal(ctx.computeAsrFlushDelay({hasFinal:false,hasPartial:true,heardVoice:true}),220);
-  assert.equal(ctx.computeAsrFlushDelay({hasFinal:false,hasPartial:false,heardVoice:true}),650);
+  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'strong_complete',asrIsFinal:true,msSinceLastAsrUpdate:200}),180);
+  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'neutral',asrIsFinal:true,msSinceLastAsrUpdate:200}),260);
+  assert.equal(ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'likely_incomplete',asrIsFinal:false,msSinceLastAsrUpdate:200}),900);
+  assert.equal(ctx.computeAsrFlushDelay({hasFinal:true,hasPartial:true,heardVoice:true}),20);
+  assert.equal(ctx.computeAsrFlushDelay({hasFinal:false,hasPartial:true,heardVoice:true}),80);
+  assert.equal(ctx.computeAsrFlushDelay({hasFinal:false,hasPartial:false,heardVoice:true}),300);
 }
 
 function testFastEotCommitsOnlyOnce(){
@@ -99,14 +99,14 @@ function testFastEotCommitsOnlyOnce(){
     turnCommitTimer:null, usingFallback:false, finals:'That is the reason.',lastPartial:'',
     lastAsrWasFinal:true,lastVoiceActivityAt:1,asrWS:null,
     runtimeFeatures:{fast_eot:true},
-    computeAsrFlushDelay:({hasFinal,hasPartial,heardVoice})=>hasFinal?60:hasPartial?220:heardVoice?650:0,
+    computeAsrFlushDelay:({hasFinal,hasPartial,heardVoice})=>hasFinal?20:hasPartial?80:heardVoice?300:0,
     earDiag:()=>{},fbStop:()=>{},finishTurn:()=>{finished++;},
   });
   vm.runInContext(section('function armMicSilence','function startMicWatch'),ctx);
   ctx.commitAudioTurn();
   ctx.commitAudioTurn();
   assert.equal(timers.tasks.size,1);
-  timers.runDelay(60);
+  timers.runDelay(20);
   assert.equal(finished,1);
   ctx.commitAudioTurn();
   assert.equal(finished,1);
@@ -125,12 +125,12 @@ function testAsrUpdateReschedulesPendingCommit(){
   vm.runInContext(section('function armMicSilence','function startMicWatch'),ctx);
   ctx.scheduleTurnCommit();
   const first=[...timers.tasks.values()][0].delay;
-  assert.ok(first>1000);
+  assert.ok(first>=850);
   ctx.finals='We work with overseas clients. ';
   ctx.noteAsrUpdate('We work with overseas clients.',true);
   assert.equal(timers.tasks.size,1);
   const second=[...timers.tasks.values()][0].delay;
-  assert.ok(second<=350);
+  assert.ok(second<=180);
 }
 
 function testFastEotFlagRestoresLegacyTiming(){
@@ -184,8 +184,8 @@ function testThirtyUtteranceEotPolicyCorpus(){
   assert.ok(shortComplete.every(value=>ctx.classifyTurnCompletion(value)==='strong_complete'));
   assert.ok(mediumComplete.every(value=>ctx.classifyTurnCompletion(value)!=='likely_incomplete'));
   assert.ok(pausePrefixes.every(value=>ctx.classifyTurnCompletion(value)==='likely_incomplete'));
-  const strongTotal=300+ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'strong_complete',asrIsFinal:true,msSinceLastAsrUpdate:200});
-  assert.ok(strongTotal<=700);
+  const strongTotal=200+ctx.computeTurnCommitDelay({paceMode:'normal',completionClass:'strong_complete',asrIsFinal:true,msSinceLastAsrUpdate:200})+ctx.computeAsrFlushDelay({hasFinal:true,hasPartial:true,heardVoice:true});
+  assert.ok(strongTotal<=400);
 }
 
 function streamingPlayerContext(){
@@ -353,6 +353,13 @@ function testStreamingPlayerCancelAndUnsupportedFallback(){
   player.ws.readyState=1; player.cancel();
   assert.equal(player.cancelled,true);
   assert.equal(player.ws.sent.at(-1).type,'cancel');
+  ctx.ManagedMediaSource=ctx.MediaSource;
+  ctx.MediaSource=undefined;
+  assert.equal(vm.runInContext('StreamingReplyPlayer.supported()',ctx),true);
+  const managedPlayer=vm.runInContext("new StreamingReplyPlayer({replyId:'managed',generation:3,onFallback:()=>{}})",ctx);
+  assert.equal(managedPlayer.audio.disableRemotePlayback,true);
+  ctx.MediaSource=ctx.ManagedMediaSource;
+  ctx.ManagedMediaSource=undefined;
   ctx.MediaSource.isTypeSupported=()=>false;
   assert.equal(vm.runInContext('StreamingReplyPlayer.supported()',ctx),false);
   const selection=section('function beginStreamingReply','function enqueueSpeech');
@@ -490,6 +497,12 @@ async function testFirstSpeakableSplitUsesSafeBoundaries(){
   await ctx.chatStream([],value=>emitted.push(value));
   assert.ok(emitted.length>=2);
   assert.equal(emitted.join(' '),'This response keeps going without punctuation until it reaches a useful natural boundary');
+
+  chunks.splice(0,chunks.length,'[neutral] That makes sense. Here is the useful part.');
+  index=0; emitted.length=0;
+  await ctx.chatStream([],value=>emitted.push(value));
+  assert.equal(emitted[0],'That makes sense.');
+  assert.equal(emitted.join(' '),'That makes sense. Here is the useful part.');
 
   chunks.splice(0,chunks.length,'[neutral] Please repeat this later [echo: This complete target phrase stays together]');
   index=0; emitted.length=0;
@@ -641,12 +654,16 @@ function testAcknowledgementIsNotSemanticFirstAudio(){
   now=700; trace.mark('semantic_audio_playing',{tts_path:'blob'});
   assert.equal(trace.finalized,true);
   assert.equal(posted.semantic_first_audio_ms,500);
+  assert.equal(posted.target_ms,1500);
+  assert.equal(posted.target_met,true);
   assert.equal(posted.stages_ms.ack_audio_playing,100);
 }
 
 function testFillerWarmupStaysOffCriticalStartupPath(){
   const startSource=section('async function startCall','function startTimer');
   assert.doesNotMatch(startSource,/connectASR\(\);\s*prepFillers\(\)/);
+  assert.match(startSource,/fillerWarmStarted=true/);
+  assert.match(startSource,/callLater\(\(\)=>\{if\(active&&fillerWarmStarted&&!fillersReady\)prepFillers\(\);\},0\)/);
   const queueSource=section('async function pumpQueue','/* \u64ad\u653e\u4e00\u6bb5\u8bed\u97f3');
   assert.match(queueSource,/startListening\(\); scheduleFillerWarmup\(\)/);
   const fillerSource=section('async function prepFillers','let lastFiller');
@@ -654,7 +671,7 @@ function testFillerWarmupStaysOffCriticalStartupPath(){
   assert.match(fillerSource,/const thinks=\['Hmm\.\.\.',\s*'\(emm\)'\]/);
   const ackSource=section('function playFiller','let gapFills');
   assert.match(ackSource,/replySeg!==0/);
-  assert.match(ackSource,/},650\)/);
+  assert.match(ackSource,/},320\)/);
 }
 
 async function testReconnectResetsRuntimeBeforeOpeningStream(){

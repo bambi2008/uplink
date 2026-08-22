@@ -75,6 +75,11 @@ CHAT_MODELS = tuple(model.strip() for model in os.environ.get(
 CHAT_MODEL = CHAT_MODELS[0]
 CHAT_MODEL_FALLBACK = CHAT_MODELS[1] if len(CHAT_MODELS) > 1 else CHAT_MODELS[0]
 TTS_MODEL = "speech-2.8-turbo"
+try:
+    TTS_VOLUME = float(os.environ.get("UPLINK_TTS_VOLUME", "2.0"))
+except (TypeError, ValueError):
+    TTS_VOLUME = 2.0
+TTS_VOLUME = min(10.0, max(0.1, TTS_VOLUME))
 MINIMAX_TTS_WS = os.environ.get("UPLINK_MINIMAX_TTS_WS", "wss://api.minimaxi.com/ws/v1/t2a_v2")
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=50)
 SETTINGS_LOCK = asyncio.Lock()
@@ -87,7 +92,7 @@ def env_flag(name, default=False):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-LATENCY_TRACE = env_flag("UPLINK_LATENCY_TRACE", False)
+LATENCY_TRACE = env_flag("UPLINK_LATENCY_TRACE", True)
 LOW_LATENCY = env_flag("UPLINK_LOW_LATENCY", True)
 FAST_EOT = env_flag("UPLINK_FAST_EOT", True)
 STREAM_TTS = env_flag("UPLINK_STREAM_TTS", True)
@@ -191,7 +196,7 @@ def _tts_start_event(options):
     model = str(options.get("model") or TTS_MODEL)[:48]
     language_boost = str(options.get("language_boost") or "auto")[:32]
     voice_setting = {"voice_id": voice, "speed": float(options.get("speed") or 1.0),
-                     "vol": 1, "pitch": 0}
+                     "vol": TTS_VOLUME, "pitch": 0}
     emotion = str(options.get("emotion") or "").strip()
     if emotion:
         voice_setting["emotion"] = emotion[:24]
@@ -731,7 +736,7 @@ async def api_chat(req):
                 _chat_endpoint(),
                 headers={"Authorization": "Bearer " + key,
                          "Content-Type": "application/json"},
-                json=_chat_payload(model_try, messages, 0.8, True),
+                json=_chat_payload(model_try, messages, 0.55, True),
             )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             failures.append((model_try, 0, type(exc).__name__))
@@ -910,7 +915,7 @@ async def _api_tts_legacy(req):
         return web.json_response({"error": "缺少要合成的文字"}, status=400)
 
     voice_setting = {"voice_id": body.get("voice", "English_magnetic_voiced_man"),
-                     "speed": body.get("speed", 1.0)}
+                     "speed": body.get("speed", 1.0), "vol": TTS_VOLUME, "pitch": 0}
     if body.get("emotion"):
         voice_setting["emotion"] = body["emotion"]
 
@@ -964,7 +969,7 @@ async def api_tts(req):
         return web.json_response({"error": "缺少要合成的文字"}, status=400)
 
     voice_setting = {"voice_id": body.get("voice", "English_magnetic_voiced_man"),
-                     "speed": body.get("speed", 1.0)}
+                     "speed": body.get("speed", 1.0), "vol": TTS_VOLUME, "pitch": 0}
     if body.get("emotion"):
         voice_setting["emotion"] = body["emotion"]
     tts_model = body.get("model") or TTS_MODEL
@@ -973,7 +978,7 @@ async def api_tts(req):
     turn_id = _safe_id(body.get("turn_id"))
     started = time.perf_counter()
     cacheable = purpose in {"ack", "filler"}
-    cache_key = (voice_setting["voice_id"], tts_model, voice_setting["speed"],
+    cache_key = (voice_setting["voice_id"], tts_model, voice_setting["speed"], voice_setting["vol"],
                  voice_setting.get("emotion", ""), lang_boost, text)
     if cacheable and cache_key in TTS_CACHE:
         audio = TTS_CACHE.pop(cache_key)

@@ -76,7 +76,8 @@ docker run --env-file .env.commercial -p 8800:8800 -v uplink-data:/data uplink
 P0 低延迟机制默认开启，开发或故障回滚时可在启动服务前独立关闭：
 
 ```text
-UPLINK_LATENCY_TRACE=0  # 默认关闭；设为 1 才写匿名延迟 JSONL
+UPLINK_LATENCY_TRACE=1  # 默认开启，只写匿名分阶段耗时；设为 0 可关闭
+UPLINK_TTS_VOLUME=2.0   # MiniMax 合成增益；官方允许范围 (0, 10]
 UPLINK_LOW_LATENCY=0    # 恢复旧 Chat/TTS 请求实现
 UPLINK_FAST_EOT=0       # 恢复旧停顿与 ASR 收尾时序
 UPLINK_STREAM_TTS=0     # 完整恢复 /api/tts blob 播放路径

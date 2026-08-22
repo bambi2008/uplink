@@ -222,6 +222,8 @@ class StreamingTtsProtocolTests(unittest.TestCase):
         self.assertEqual(event["event"], "task_start")
         self.assertEqual(event["model"], "speech-2.8-turbo")
         self.assertEqual(event["voice_setting"]["voice_id"], "English_magnetic_voiced_man")
+        self.assertEqual(event["voice_setting"]["vol"], server.TTS_VOLUME)
+        self.assertGreater(event["voice_setting"]["vol"], 1)
         self.assertEqual(event["audio_setting"], {
             "sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1,
         })
