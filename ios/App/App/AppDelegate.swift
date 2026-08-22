@@ -8,19 +8,26 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     private var audioRouteObserver: NSObjectProtocol?
 
+    private func keepBuiltInAudioOnSpeaker() {
+        let session = AVAudioSession.sharedInstance()
+        guard session.currentRoute.outputs.contains(where: { $0.portType == .builtInReceiver }) else {
+            return
+        }
+        do {
+            try session.overrideOutputAudioPort(.speaker)
+        } catch {
+            NSLog("Uplink speaker routing deferred: %@", error.localizedDescription)
+        }
+    }
+
     private func configureCallAudio() {
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playAndRecord,
-                                    mode: .voiceChat,
-                                    options: [.defaultToSpeaker, .allowBluetooth])
+                                    mode: .videoChat,
+                                    options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP])
             try session.setActive(true)
-
-            // playAndRecord can fall back to the quiet receiver after WebKit opens the mic.
-            // Keep wired and Bluetooth routes intact, but move the built-in receiver to speaker.
-            if session.currentRoute.outputs.contains(where: { $0.portType == .builtInReceiver }) {
-                try session.overrideOutputAudioPort(.speaker)
-            }
+            keepBuiltInAudioOnSpeaker()
         } catch {
             // The web call still works if iOS temporarily owns the audio session.
             NSLog("Uplink audio session configuration deferred: %@", error.localizedDescription)
@@ -34,7 +41,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] _ in
-            self?.configureCallAudio()
+            // Do not reset the category while WebKit is decoding or playing Jake's audio.
+            // A route change can be emitted by our own speaker override, so only re-apply
+            // the route after iOS has settled instead of recursively reconfiguring the session.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self?.keepBuiltInAudioOnSpeaker()
+            }
         }
         return true
     }

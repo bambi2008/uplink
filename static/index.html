@@ -1204,11 +1204,30 @@ async function pumpQueue(){
 /* 播放一段语音；被浏览器自动播放策略拦截时，提示用户点一下解锁并在点击后重播 */
 let audioUnlocked=false;
 let stopCurrentAudio=()=>{};
-function playBlob(blob,meta){
+async function playableAudioBlob(blob){
+  /* iOS checks the real container more strictly than desktop browsers.  Keep the
+     response MIME honest when an upstream TTS service returns WAV/AAC/MP4 bytes
+     behind a generic or incorrect audio/mpeg header. */
+  try{
+    const h=new Uint8Array(await blob.slice(0,16).arrayBuffer());
+    const ascii=(a,b)=>String.fromCharCode(...h.slice(a,b));
+    let type='';
+    if(ascii(0,4)==='RIFF'&&ascii(8,12)==='WAVE')type='audio/wav';
+    else if(ascii(0,4)==='OggS')type='audio/ogg';
+    else if(ascii(0,4)==='fLaC')type='audio/flac';
+    else if(ascii(4,8)==='ftyp')type='audio/mp4';
+    else if(h[0]===0xff&&(h[1]&0xf6)===0xf0)type='audio/aac';
+    else if(ascii(0,3)==='ID3'||(h[0]===0xff&&(h[1]&0xe0)===0xe0))type='audio/mpeg';
+    if(type&&blob.type!==type)return new Blob([blob],{type});
+  }catch(e){}
+  return blob;
+}
+async function playBlob(blob,meta){
+  blob=await playableAudioBlob(blob);
   return new Promise(res=>{
     const url=URL.createObjectURL(blob), audio=new Audio(url);
-    audio.playsInline=true;
-    let done=false, unlockHandler=null;
+    audio.playsInline=true; audio.preload='auto'; audio.volume=1;
+    let done=false, unlockHandler=null, playbackRetry=0;
     const finish=()=>{
       if(done)return;
       done=true; audioUnlocked=true; speakingStartedAt=0; bargeFrames=0; bargePreRoll=[]; URL.revokeObjectURL(url);
@@ -1219,7 +1238,20 @@ function playBlob(blob,meta){
     };
     stopCurrentAudio=finish; curAudio=audio;
     audio.onended=finish;
-    audio.onerror=()=>{ setStatus('⚠️ 音频播放出错（设备/驱动问题）'); finish(); };
+    const handlePlaybackError=()=>{
+      if(!done&&playbackRetry++<1&&active&&!interrupted){
+        /* Audio routes can take a fraction of a second to settle after the mic
+           opens.  One clean reload avoids surfacing that transient iOS error. */
+        audio.onerror=null;
+        try{audio.pause();audio.src=url;audio.load()}catch(e){}
+        setTimeout(()=>{if(!done){audio.onerror=handlePlaybackError;audio.play().then(onPlaying).catch(()=>{
+          setStatus('⚠️ 音频播放出错 · 请结束本次通话后重新拨打');finish();
+        });}},180);
+        return;
+      }
+      setStatus('⚠️ 音频播放出错 · 请结束本次通话后重新拨打'); finish();
+    };
+    audio.onerror=handlePlaybackError;
     const onPlaying=()=>{
       audioUnlocked=true;speakingStartedAt=Date.now();bargeNoiseFloor=Math.max(micNoiseFloor,0.003);
       if(meta&&meta.purpose==='ack')markTurn('ack_audio_playing');
@@ -1337,7 +1369,7 @@ async function openMic(){
       const f32=e.inputBuffer.getChannelData(0);
       const i16=new Int16Array(f32.length);
       let sum=0;
-      const inputGain=window.UplinkNative&&window.UplinkNative.isNative?1.65:1;
+      const inputGain=['capacitor:','ionic:'].includes(location.protocol)?1.65:1;
       for(let i=0;i<f32.length;i++){
         let s=Math.max(-1,Math.min(1,f32[i]*inputGain));
         sum+=s*s; i16[i]=s<0?s*32768:s*32767;
