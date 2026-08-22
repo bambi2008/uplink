@@ -19,6 +19,8 @@ function makeContext(extra={}){
     console,Date,Math,Promise,TextDecoder,TextEncoder,
     markTurn:()=>{},markTurnOnce:()=>{},cancelTurnTrace:()=>{},beginTurnTrace:()=>({id:'test-turn'}),
     cancelFillerWarmup:()=>{},
+    speakingStatus:()=> 'Jake speaking',speakingEarStatus:()=> 'Jake speaking',
+    isNativeMobileRuntime:()=>false,
     streamingReply:null,
     ...extra,
   });
@@ -222,6 +224,7 @@ function streamingPlayerContext(){
     playing:false,playbackOwner:-1,curAudio:null,audioUnlocked:true,semanticHasPlayed:false,
     speakingStartedAt:0,bargeNoiseFloor:0.003,micNoiseFloor:0.003,phase:'thinking',genDone:false,
     setHalo:()=>{},setStatus:()=>{},earDiag:()=>{},markTurn:()=>{},startListening:()=>{},
+    speakingStatus:()=> 'Jake speaking',speakingEarStatus:()=> 'Jake speaking',
     scheduleFillerWarmup:()=>{},
   });
   vm.runInContext(section('class StreamingReplyPlayer','/* ---------- \u8bbe\u7f6e\u5f39\u7a97 ---------- */'),ctx);
@@ -372,10 +375,12 @@ function testStreamingPlayerCancelAndUnsupportedFallback(){
 function testVoiceTakeoverNeedsSustainedSpeech(){
   let interrupted=0, captured=[];
   const ctx=makeContext({
+    location:{protocol:'https:'},window:{},semanticHasPlayed:true,
     phase:'speaking', playing:true, curAudio:{paused:false},
     speakingStartedAt:Date.now()-1000, thinkingStartedAt:0,
     bargeFrames:0, bargePreRoll:[], bargeNoiseFloor:0.003,
-    micNoiseFloor:0.003,
+    micNoiseFloor:0.003,micRawNoiseFloor:0.003,
+    isNativeMobileRuntime:()=>false,
     interruptJakeForUser:(source,pre)=>{interrupted++;captured=pre;},
   });
   vm.runInContext(section('function monitorUserTakeover','async function openMic'),ctx);
@@ -384,8 +389,32 @@ function testVoiceTakeoverNeedsSustainedSpeech(){
   ctx.monitorUserTakeover(frame,0.08,0.01);
   assert.equal(interrupted,0);
   ctx.monitorUserTakeover(frame,0.08,0.01);
+  assert.equal(interrupted,0);
+  ctx.monitorUserTakeover(frame,0.08,0.01);
   assert.equal(interrupted,1);
-  assert.equal(captured.length,2);
+  assert.equal(captured.length,3);
+}
+
+function testOpeningNoiseAndNativeEchoCannotInterrupt(){
+  let interrupted=0;
+  const ctx=makeContext({
+    location:{protocol:'capacitor:'},window:{UplinkNative:{isNative:true}},semanticHasPlayed:false,
+    phase:'thinking',playing:false,curAudio:null,
+    speakingStartedAt:0,thinkingStartedAt:Date.now()-2000,
+    bargeFrames:0,bargePreRoll:[],bargeNoiseFloor:0.003,
+    micNoiseFloor:0.003,micRawNoiseFloor:0.003,
+    interruptJakeForUser:()=>{interrupted++;},
+  });
+  vm.runInContext(section('function isNativeMobileRuntime','function beginTurnTrace'),ctx);
+  vm.runInContext(section('function monitorUserTakeover','async function openMic'),ctx);
+  const frame=new Int16Array(4096);
+  for(let i=0;i<8;i++)ctx.monitorUserTakeover(frame,0.12,0.01);
+  assert.equal(interrupted,0,'opening greeting must not be cancelled by microphone noise');
+
+  ctx.semanticHasPlayed=true;
+  ctx.phase='speaking';ctx.playing=true;ctx.curAudio={paused:false};ctx.speakingStartedAt=Date.now()-2000;
+  for(let i=0;i<8;i++)ctx.monitorUserTakeover(frame,0.12,0.01);
+  assert.equal(interrupted,0,'native speaker echo must not auto-interrupt Jake');
 }
 
 function testInterruptInvalidatesOldWork(){
@@ -661,9 +690,8 @@ function testAcknowledgementIsNotSemanticFirstAudio(){
 
 function testFillerWarmupStaysOffCriticalStartupPath(){
   const startSource=section('async function startCall','function startTimer');
-  assert.doesNotMatch(startSource,/connectASR\(\);\s*prepFillers\(\)/);
-  assert.match(startSource,/fillerWarmStarted=true/);
-  assert.match(startSource,/callLater\(\(\)=>\{if\(active&&fillerWarmStarted&&!fillersReady\)prepFillers\(\);\},0\)/);
+  assert.doesNotMatch(startSource,/fillerWarmStarted=true/);
+  assert.doesNotMatch(startSource,/prepFillers\(\)/);
   const queueSource=section('async function pumpQueue','/* \u64ad\u653e\u4e00\u6bb5\u8bed\u97f3');
   assert.match(queueSource,/startListening\(\); scheduleFillerWarmup\(\)/);
   const fillerSource=section('async function prepFillers','let lastFiller');
@@ -741,6 +769,7 @@ testStreamingPlayerDropsOldChunksAndFallbacksOnce();
 testFailedPreconnectLeavesListeningRecoveryToBlobQueue();
 testStreamingPlayerCancelAndUnsupportedFallback();
 testVoiceTakeoverNeedsSustainedSpeech();
+testOpeningNoiseAndNativeEchoCannotInterrupt();
 testInterruptInvalidatesOldWork();
 testLiveCoachingPromptIsEphemeral();
 testBackendFailuresAreReportedTogether();
